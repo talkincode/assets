@@ -1,9 +1,7 @@
 /**
  * Public read path: GET|HEAD /<hash>/<filename?>
  *
- * The hash alone identifies the bytes; the filename is decoration that also
- * decides the download name, which is why an arbitrary name is accepted and
- * sanitised rather than validated against the stored one.
+ * The path hash is a share-link locator. Filename only affects Content-Disposition.
  */
 
 import {
@@ -16,10 +14,21 @@ import {
   RESERVED_SEGMENTS,
   sanitizeFilename,
 } from './util';
-import { describeAsset, getAsset, run, type AssetRow } from './db';
+import {
+  all,
+  describeAsset,
+  getLink,
+  projectRef,
+  projectsByIds,
+  run,
+  type AssetRow,
+  type LinkRow,
+  type ProjectRef,
+} from './db';
 import type { Ctx } from './router';
 import { canonicalAssetUrl } from './cache';
 import { isBlocked, registerMiss, withinRequestBudget } from './abuse';
+import { isLinkLive, linkUrl } from './links';
 
 const RANGE_PATTERN = /^bytes=(\d*)-(\d*)$/;
 
@@ -34,6 +43,15 @@ function notFound(headers: HeadersInit = {}): Response {
   merged.set('cache-control', 'no-store');
   applyDocumentGuards(merged);
   return new Response('not found\n', { status: 404, headers: merged });
+}
+
+function gone(message: string): Response {
+  const headers = new Headers({
+    'content-type': 'text/plain; charset=utf-8',
+    'cache-control': 'no-store',
+  });
+  applyDocumentGuards(headers);
+  return new Response(`${message}\n`, { status: 410, headers });
 }
 
 function blockedResponse(retryAfter: number): Response {
@@ -89,10 +107,10 @@ function downloadMode(url: URL, contentType: string): 'inline' | 'attachment' {
   return isPreviewable(contentType) ? 'inline' : 'attachment';
 }
 
-function cacheSeconds(env: Env, asset: AssetRow, now: number): number {
+function cacheSeconds(env: Env, link: LinkRow, now: number): number {
   const configured = Math.max(0, Number.parseInt(env.CACHE_TTL_SECONDS, 10) || 60);
-  if (asset.expires_at === null) return configured;
-  const remaining = Math.max(0, Math.floor((asset.expires_at - now) / 1000));
+  if (link.expires_at === null) return configured;
+  const remaining = Math.max(0, Math.floor((link.expires_at - now) / 1000));
   return Math.min(configured, remaining);
 }
 
@@ -119,8 +137,7 @@ export async function handleAssetRequest(ctx: Ctx): Promise<Response> {
 
   // Reserved service paths (favicon, robots, admin…) answer quietly: a browser
   // asking for one is not an attack. Everything else that is not a valid hash
-  // is somebody guessing, and guessing is what the guard counts. In the first
-  // hours after deployment this caught two scanners probing /.env.prod.
+  // is somebody guessing, and guessing is what the guard counts.
   const problem = hashProblem(hash);
   if (problem) {
     if (RESERVED_SEGMENTS.has(hash.toLowerCase())) return notFound();
@@ -130,25 +147,23 @@ export async function handleAssetRequest(ctx: Ctx): Promise<Response> {
   }
 
   const now = Date.now();
-  const asset = await getAsset(env, hash);
-  if (!asset) {
+  const link = await getLink(env, hash);
+  if (!link) {
     const verdict = await registerMiss(env, request, 'unknown hash');
     if (verdict.blocked) return blockedResponse(verdict.retryAfter);
     return notFound();
   }
-  // Expiry is answered before the sweep gets to it, and keeps answering 410
-  // afterwards, so the status a client sees does not depend on when
-  // housekeeping happened to run.
-  if (asset.expires_at !== null && asset.expires_at <= now) {
-    const headers = new Headers({
-      'content-type': 'text/plain; charset=utf-8',
-      'cache-control': 'no-store',
-    });
-    applyDocumentGuards(headers);
-    return new Response('this asset has expired\n', { status: 410, headers });
+  if (link.revoked_at !== null) return notFound();
+  if (link.expires_at !== null && link.expires_at <= now) {
+    return gone('this link has expired');
   }
-  if (asset.purged_at !== null) return notFound();
-  if (asset.deleted_at !== null) return notFound();
+
+  const asset = await env.DB.prepare('SELECT * FROM assets WHERE hash = ?')
+    .bind(link.asset_hash)
+    .first<AssetRow>();
+  if (!asset || asset.purged_at !== null || asset.deleted_at !== null) {
+    return notFound();
+  }
 
   const requested = sanitizeFilename(ctx.params.filename ?? asset.filename, asset.filename);
   const filename = requested || asset.filename;
@@ -160,7 +175,7 @@ export async function handleAssetRequest(ctx: Ctx): Promise<Response> {
   headers.set('content-disposition', contentDisposition(filename, mode));
   headers.set('etag', etagFor(asset));
   headers.set('accept-ranges', 'bytes');
-  headers.set('cache-control', `public, max-age=${cacheSeconds(env, asset, now)}`);
+  headers.set('cache-control', `public, max-age=${cacheSeconds(env, link, now)}`);
 
   const inm = request.headers.get('if-none-match');
   if (inm && inm.split(',').some((value) => value.trim() === etagFor(asset))) {
@@ -175,18 +190,15 @@ export async function handleAssetRequest(ctx: Ctx): Promise<Response> {
   }
 
   if (!range) {
-    const cached = await caches.default.match(cacheRequest(env, asset.hash));
+    const cached = await caches.default.match(cacheRequest(env, link.hash));
     if (cached) {
       headers.set('content-length', String(asset.size));
-      // Headers are rebuilt for this request. Only the bytes are cached, so a
-      // junk query or a different filename cannot mint a new cache entry.
       return new Response(cached.body, { status: 200, headers });
     }
   }
 
   const object = await env.BUCKET.get(asset.object_key, range ? { range } : undefined);
   if (!object) {
-    // Metadata without bytes: the sweeper is behind or the object was removed.
     return notFound({ 'x-assets-state': 'metadata-only' });
   }
 
@@ -198,8 +210,8 @@ export async function handleAssetRequest(ctx: Ctx): Promise<Response> {
 
   const response = new Response(body, { status: range ? 206 : 200, headers });
   if (!range) {
-    ctx.exec.waitUntil(countDownload(env, asset));
-    ctx.exec.waitUntil(caches.default.put(cacheRequest(env, asset.hash), response.clone()));
+    ctx.exec.waitUntil(countDownload(env, link.hash));
+    ctx.exec.waitUntil(caches.default.put(cacheRequest(env, link.hash), response.clone()));
   }
   return response;
 }
@@ -208,20 +220,110 @@ function cacheRequest(env: Env, hash: string): Request {
   return new Request(canonicalAssetUrl(env.PUBLIC_BASE_URL, hash), { method: 'GET' });
 }
 
-function countDownload(env: Env, asset: AssetRow): Promise<unknown> {
+function countDownload(env: Env, linkHash: string): Promise<unknown> {
   return run(
     env,
-    'UPDATE assets SET downloads = downloads + 1, last_access_at = ? WHERE hash = ?',
+    'UPDATE links SET downloads = downloads + 1, last_access_at = ? WHERE hash = ?',
     Date.now(),
-    asset.hash,
+    linkHash,
   ).catch(() => undefined);
 }
 
 /** Shared by the admin list so the dashboard and the CLI agree on shape. */
-export function assetSummary(env: Env, asset: AssetRow, now = Date.now()) {
-  const view = describeAsset(asset, now);
+export function assetSummary(
+  env: Env,
+  asset: AssetRow,
+  now = Date.now(),
+  extras: {
+    live_links?: number;
+    downloads?: number;
+    url?: string | null;
+    primary_link_hash?: string | null;
+    project?: ProjectRef | null;
+  } = {},
+) {
+  const view = describeAsset(asset, now, {
+    live_links: extras.live_links,
+    downloads: extras.downloads,
+  });
   return {
     ...view,
-    url: `${env.PUBLIC_BASE_URL}${view.url_path}`,
+    url: extras.url ?? null,
+    primary_link_hash: extras.primary_link_hash ?? null,
+    project: extras.project ?? null,
   };
 }
+
+/** Attach project refs to summarized assets that already carry project_id. */
+export async function withProjects<T extends { project_id: string | null }>(
+  env: Env,
+  rows: T[],
+): Promise<(T & { project: ProjectRef | null })[]> {
+  const map = await projectsByIds(
+    env,
+    rows.map((row) => row.project_id).filter((id): id is string => Boolean(id)),
+  );
+  return rows.map((row) => ({
+    ...row,
+    project: projectRef(row.project_id ? map.get(row.project_id) : null),
+  }));
+}
+
+/** Load live-link aggregates for a set of asset hashes. */
+export async function linkStatsForAssets(
+  env: Env,
+  hashes: string[],
+  now = Date.now(),
+): Promise<Map<string, { live_links: number; downloads: number; primary_hash: string | null }>> {
+  const map = new Map<string, { live_links: number; downloads: number; primary_hash: string | null }>();
+  for (const hash of hashes) {
+    map.set(hash, { live_links: 0, downloads: 0, primary_hash: null });
+  }
+  if (hashes.length === 0) return map;
+
+  const placeholders = hashes.map(() => '?').join(',');
+  const rows = await all<{
+    asset_hash: string;
+    hash: string;
+    expires_at: number | null;
+    revoked_at: number | null;
+    downloads: number;
+    created_at: number;
+  }>(
+    env,
+    `SELECT asset_hash, hash, expires_at, revoked_at, downloads, created_at
+     FROM links WHERE asset_hash IN (${placeholders})
+     ORDER BY created_at DESC`,
+    ...hashes,
+  );
+  for (const row of rows) {
+    const entry = map.get(row.asset_hash)!;
+    entry.downloads += row.downloads;
+    const live = isLinkLive(row as LinkRow, now);
+    if (live) {
+      entry.live_links += 1;
+      if (!entry.primary_hash) entry.primary_hash = row.hash;
+    }
+  }
+  return map;
+}
+
+export function summarizeAssetWithLinks(
+  env: Env,
+  asset: AssetRow,
+  stats: { live_links: number; downloads: number; primary_hash: string | null },
+  now = Date.now(),
+  project: ProjectRef | null = null,
+) {
+  const url = stats.primary_hash ? linkUrl(env, stats.primary_hash, asset.filename) : null;
+  return assetSummary(env, asset, now, {
+    live_links: stats.live_links,
+    downloads: stats.downloads,
+    url,
+    primary_link_hash: stats.primary_hash,
+    project,
+  });
+}
+
+// Re-export so call sites that only need the type keep working.
+export type { LinkRow };

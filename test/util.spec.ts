@@ -11,9 +11,12 @@ import {
   parseTimestamp,
   assetKind,
   isActiveContent,
+  isEditableTextAsset,
+  isMarkdownAsset,
   normalizeTags,
   serializeTags,
   decodeTags,
+  normalizeProjectSlug,
 } from '../src/util';
 import { parseRange } from '../src/assets';
 
@@ -107,6 +110,17 @@ describe('filenames', () => {
     expect(isActiveContent('image/png')).toBe(false);
   });
 
+  it('recognizes markdown and plain text for the online editor', () => {
+    expect(isMarkdownAsset('text/markdown', 'note.md')).toBe(true);
+    expect(isMarkdownAsset('text/plain', 'readme.markdown')).toBe(true);
+    expect(isMarkdownAsset('text/plain', 'notes.txt')).toBe(false);
+    expect(isEditableTextAsset('text/markdown; charset=utf-8', 'a.md')).toBe(true);
+    expect(isEditableTextAsset('text/plain', 'a.txt')).toBe(true);
+    expect(isEditableTextAsset('text/html', 'a.html')).toBe(false);
+    expect(isEditableTextAsset('image/svg+xml', 'a.svg')).toBe(false);
+    expect(guessContentType('doc.md')).toContain('markdown');
+  });
+
   it('normalizes tag lists from commas and arrays', () => {
     expect(normalizeTags('课件, PDF， 课件')).toEqual(['课件', 'PDF']);
     expect(normalizeTags(['a', ' a ', '', 'b'])).toEqual(['a', 'b']);
@@ -115,6 +129,13 @@ describe('filenames', () => {
     expect(decodeTags('["课件","PDF"]')).toEqual(['课件', 'PDF']);
     expect(decodeTags(null)).toEqual([]);
     expect(() => normalizeTags('x'.repeat(41))).toThrowError(/40/);
+  });
+
+  it('normalizes project slugs for CLI --project', () => {
+    expect(normalizeProjectSlug('Cool Learn')).toBe('cool-learn');
+    expect(normalizeProjectSlug('li_cui')).toBe('li-cui');
+    expect(() => normalizeProjectSlug('李翠')).toThrowError(/slug/);
+    expect(() => normalizeProjectSlug('a')).toThrowError(/2/);
   });
 });
 

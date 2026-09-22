@@ -30,6 +30,13 @@ npm run db:migrate:tags
 npm run db:migrate:tags:local
 ```
 
+已有库加项目表（只需跑一次）：
+
+```bash
+npm run db:migrate:projects
+npm run db:migrate:projects:local
+```
+
 ## 2. 首次部署
 
 ```bash
@@ -107,11 +114,29 @@ node scripts/set-wrangler-vars.mjs ACCESS_TEAM_DOMAIN=<team>.cloudflareaccess.co
 npx wrangler deploy
 ```
 
-### 登录方式
+### 登录方式（Email One-time PIN）
 
-Access 应用默认支持 **One-time PIN**（邮件验证码），只允许名单里的邮箱，开箱可用。
-想换成 Google SSO：Zero Trust → Settings → Authentication → Login methods 添加 Google
-（需要自建 Google OAuth 客户端），然后在应用的 Authentication 里选中它。
+新版 Zero Trust 默认 IdP 是 **Cloudflare 账号登录**，不会自动带上邮箱验证码。
+`setup-access.sh` 会：
+
+1. 确保存在 `type=onetimepin` 的 Identity Provider；
+2. 把应用的 `auto_redirect_to_identity` 设为 `false`，登录页能看到邮箱 OTP。
+
+手工补齐：Zero Trust → Integrations → Identity providers → Add → **One-time PIN**。
+
+登录流程：打开 `/admin/` → 输入允许名单里的邮箱 → 收信（`noreply@notify.cloudflare.com`）
+→ 填入 PIN。不在策略里的邮箱不会真正收到邮件（页面仍提示已发送）。
+
+想额外开 Google SSO：同一页添加 Google，再在应用 Authentication 里勾选。
+
+### 退出登录
+
+Dashboard 侧栏有「退出登录」，跳转到：
+
+`https://assets.talkincode.net/cdn-cgi/access/logout`
+
+会清掉 Access 会话 cookie。也可访问
+`https://<team>.cloudflareaccess.com/cdn-cgi/access/logout`。
 
 > Worker 侧会独立校验 `Cf-Access-Jwt-Assertion` 的 RS256 签名、`aud`、有效期与邮箱名单，
 > 命中不了就 401/403。即使有人绕过边缘，也拿不到管理数据。

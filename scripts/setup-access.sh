@@ -95,8 +95,8 @@ import json,sys
 hostname, path, name = sys.argv[1], sys.argv[2], sys.argv[3]
 print(json.dumps({
     "name": name,
-    "domain": hostname,
-    "path": path,
+    # Path must be embedded in domain; a separate `path` field is dropped by this API.
+    "domain": "%s/%s" % (hostname, path),
     "type": "self_hosted",
     "session_duration": "24h",
     "app_launcher_visible": False,
@@ -121,6 +121,59 @@ else
 fi
 
 AUD="$(api GET "/accounts/$ACCOUNT_ID/access/apps/$APP_ID" | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["aud"])')"
+
+echo "==> one-time PIN identity provider (email OTP)"
+# New Zero Trust orgs default to the Cloudflare IdP, not OTP. Ensure OTP exists
+# so allowlisted emails can sign in with a mailed PIN.
+IDPS="$(api GET "/accounts/$ACCOUNT_ID/access/identity_providers?per_page=100")"
+OTP_ID="$(echo "$IDPS" | python3 -c '
+import json,sys
+for idp in json.load(sys.stdin).get("result") or []:
+    if idp.get("type") == "onetimepin":
+        print(idp["id"])
+        break
+')"
+if [[ -z "$OTP_ID" ]]; then
+  CREATED_OTP="$(api POST "/accounts/$ACCOUNT_ID/access/identity_providers" \
+    '{"name":"One-time PIN","type":"onetimepin","config":{}}')"
+  OTP_ID="$(echo "$CREATED_OTP" | python3 -c '
+import json,sys
+payload = json.load(sys.stdin)
+if not payload.get("success"):
+    print("error: " + json.dumps(payload.get("errors")), file=sys.stderr)
+    sys.exit(1)
+print(payload["result"]["id"])
+')" || fail "could not create the One-time PIN identity provider"
+  echo "    created OTP IdP ($OTP_ID)"
+else
+  echo "    OTP IdP already present ($OTP_ID)"
+fi
+
+# Do not auto-redirect to a single IdP — the login page must show email OTP.
+# Path must live in `domain` (this API version drops a separate `path` field).
+APP_DOMAIN="${ASSETS_HOSTNAME}/${ADMIN_PATH}"
+api PUT "/accounts/$ACCOUNT_ID/access/apps/$APP_ID" "$(python3 -c '
+import json,sys
+print(json.dumps({
+    "name": sys.argv[1],
+    "domain": sys.argv[2],
+    "type": "self_hosted",
+    "session_duration": "24h",
+    "app_launcher_visible": False,
+    "auto_redirect_to_identity": False,
+    "http_only_cookie_attribute": True,
+    "same_site_cookie_attribute": "lax",
+    "zone_name": sys.argv[3],
+}))
+' "$APP_NAME" "$APP_DOMAIN" "$ZONE_NAME")" \
+  | python3 -c '
+import json,sys
+payload = json.load(sys.stdin)
+if not payload.get("success"):
+    print("error: updating app failed: " + json.dumps(payload.get("errors")), file=sys.stderr)
+    sys.exit(1)
+print("    auto_redirect_to_identity=false (OTP visible on login page)")
+' || fail "could not update the Access application login settings"
 
 echo "==> deny-everyone-else policy"
 DENY_ID="$(api GET "/accounts/$ACCOUNT_ID/access/apps/$APP_ID/policies" | python3 -c '
@@ -270,5 +323,8 @@ Next:
   curl -sS https://${ASSETS_HOSTNAME}/health
 
 The dashboard is now at https://${ASSETS_HOSTNAME}/${ADMIN_PATH}/ and only
-${ALLOWED_EMAIL} can sign in.
+${ALLOWED_EMAIL} can sign in (email One-time PIN).
+
+Logout from the dashboard sidebar, or visit:
+  https://${ASSETS_HOSTNAME}/cdn-cgi/access/logout
 MSG

@@ -2,26 +2,32 @@
  * Upload path, shared by the public key-authenticated endpoint and the
  * dashboard. Both produce the same record; only the recorded actor differs.
  *
- * The body is streamed straight into R2 while a counter enforces the size cap,
- * so a large file never has to be buffered in the worker.
+ * Creates an immutable asset plus the first share link (TTL from expires_in /
+ * never / default_ttl_days). The public URL is always the link hash.
  */
 
 import {
   HttpError,
   errorResponse,
   guessContentType,
-  hashProblem,
   jsonResponse,
+  normalizeProjectSlug,
   normalizeTags,
-  parseDuration,
   parseTimestamp,
   randomHash,
   sanitizeFilename,
   serializeTags,
 } from './util';
-import { audit, first, getNumberSetting, run } from './db';
+import { audit, getNumberSetting, getProject, getProjectBySlug, projectRef, run } from './db';
 import type { Ctx } from './router';
 import { clientIp } from './abuse';
+import {
+  allocateHash,
+  insertLink,
+  linkUrl,
+  parseExpiryHint,
+  resolveLinkExpiry,
+} from './links';
 
 export interface UploadActor {
   /** For the audit log: an email, a service token name, or `key:<name>`. */
@@ -48,20 +54,26 @@ function filenameFromRequest(request: Request, url: URL): string {
   return 'download';
 }
 
-async function resolveExpiry(env: Env, request: Request, url: URL, now: number): Promise<number | null> {
+async function resolveUploadLinkExpiry(env: Env, request: Request, url: URL, now: number): Promise<number | null> {
   const headerTtl = request.headers.get('x-expires-in');
   const headerAt = request.headers.get('x-expires-at');
-  const ttlRaw = url.searchParams.get('expires_in') ?? url.searchParams.get('ttl') ?? headerTtl;
-  const atRaw = url.searchParams.get('expires_at') ?? headerAt;
-
-  if (atRaw !== null && atRaw !== undefined) return parseTimestamp(atRaw);
-  if (ttlRaw !== null && ttlRaw !== undefined) {
-    const seconds = parseDuration(ttlRaw);
-    return seconds === null ? null : now + seconds * 1000;
+  const hint = parseExpiryHint({
+    expires_in: url.searchParams.get('expires_in') ?? url.searchParams.get('ttl') ?? headerTtl,
+    expires_at: url.searchParams.get('expires_at') ?? headerAt,
+    never: (url.searchParams.get('expires_in') ?? url.searchParams.get('ttl') ?? headerTtl) === 'never'
+      ? true
+      : undefined,
+  });
+  // parseExpiryHint treats missing as undefined; explicit "never" via parseDuration returns null.
+  if (hint === undefined) {
+    // Also honor bare expires_at=never via parseTimestamp path above; if only
+    // expires_at header says never, parseTimestamp handles it.
+    const atRaw = url.searchParams.get('expires_at') ?? headerAt;
+    if (atRaw !== null && atRaw !== undefined) {
+      return parseTimestamp(atRaw);
+    }
   }
-  const defaultDays = await getNumberSetting(env, 'default_ttl_days', Number(env.DEFAULT_TTL_DAYS) || 7);
-  if (defaultDays <= 0) return null;
-  return now + defaultDays * 86_400_000;
+  return resolveLinkExpiry(env, hint, now);
 }
 
 /**
@@ -69,10 +81,6 @@ async function resolveExpiry(env: Env, request: Request, url: URL, now: number):
  *  - a declared `Content-Length` is verified against the cap and streamed
  *    through a FixedLengthStream (no buffering, no truncation);
  *  - a body without `Content-Length` is refused (411) instead of buffered.
- *    Chunked uploads used to pin up to 25 MB per request in the isolate.
- *
- * A `Content-Length` that understates the real body makes the stream error out
- * rather than storing a truncated object.
  */
 async function r2Body(request: Request, maxBytes: number): Promise<{ body: ReadableStream; expectedSize: number }> {
   const declaredHeader = request.headers.get('content-length');
@@ -91,7 +99,6 @@ async function r2Body(request: Request, maxBytes: number): Promise<{ body: Reada
   }
   if (declared === 0) throw new HttpError(400, 'empty_body', 'refusing to store an empty object');
   const fixed = new FixedLengthStream(declared);
-  // Must not be awaited: the put below is what drives the readable half.
   stream.pipeTo(fixed.writable).catch(() => undefined);
   return { body: fixed.readable, expectedSize: declared };
 }
@@ -125,23 +132,37 @@ export async function handleUpload(ctx: Ctx, actor: UploadActor): Promise<Respon
   const filename = filenameFromRequest(request, url);
   const contentType = guessContentType(filename, request.headers.get('content-type'));
 
-  const requestedHash = url.searchParams.get('hash') ?? request.headers.get('x-hash');
-  if (requestedHash !== null) {
-    const problem = hashProblem(requestedHash);
-    if (problem) throw new HttpError(400, 'invalid_hash', problem);
-    const existing = await first<{ hash: string }>(env, 'SELECT hash FROM assets WHERE hash = ?', requestedHash);
-    if (existing) throw new HttpError(409, 'hash_taken', 'that hash is already in use');
-  }
-  const hash = requestedHash ?? randomHash();
+  // Optional `hash` becomes the first share-link locator (public URL), not the
+  // immutable asset identity.
+  const requestedLinkHash = url.searchParams.get('hash') ?? request.headers.get('x-hash');
+  const linkHash = await allocateHash(env, requestedLinkHash);
+  const assetHash = await allocateHash(env, null);
 
-  const expiresAt = await resolveExpiry(env, request, url, now);
+  const expiresAt = await resolveUploadLinkExpiry(env, request, url, now);
   const noteRaw = url.searchParams.get('note') ?? request.headers.get('x-note');
-  // Same ceiling as the dashboard PATCH, so a header cannot store an unbounded note.
   const note = noteRaw === null ? null : noteRaw.slice(0, 500);
-  // Tags stay in the query string (or a JSON-ish header of ASCII-safe commas).
   const tagsRaw = url.searchParams.get('tags') ?? request.headers.get('x-tags');
   const tags = tagsRaw === null ? [] : normalizeTags(tagsRaw);
   const tagsJson = serializeTags(tags);
+  const projectRaw = url.searchParams.get('project')
+    ?? url.searchParams.get('project_id')
+    ?? request.headers.get('x-project');
+  let projectId: string | null = null;
+  let project = null as ReturnType<typeof projectRef>;
+  if (projectRaw !== null && projectRaw.trim() !== '') {
+    const text = projectRaw.trim();
+    const byId = await getProject(env, text);
+    if (byId) {
+      projectId = byId.id;
+      project = projectRef(byId);
+    } else {
+      const slug = normalizeProjectSlug(text);
+      const bySlug = await getProjectBySlug(env, slug);
+      if (!bySlug) throw new HttpError(404, 'project_not_found', `no project "${slug}"`);
+      projectId = bySlug.id;
+      project = projectRef(bySlug);
+    }
+  }
   const objectKey = `objects/${randomHash(26)}`;
 
   let size = 0;
@@ -153,9 +174,8 @@ export async function handleUpload(ctx: Ctx, actor: UploadActor): Promise<Respon
     const object = await env.BUCKET.put(objectKey, body, {
       httpMetadata: { contentType },
       customMetadata: {
-        hash,
+        hash: assetHash,
         filename,
-        expiresAt: expiresAt === null ? 'never' : new Date(expiresAt).toISOString(),
       },
     });
     stored = true;
@@ -164,7 +184,6 @@ export async function handleUpload(ctx: Ctx, actor: UploadActor): Promise<Respon
   } catch (error) {
     if (stored) await env.BUCKET.delete(objectKey).catch(() => undefined);
     if (error instanceof HttpError) return errorResponse(error.status, error.code, error.message);
-    // The R2/stream message is an internal detail; the client only gets a fixed code.
     console.error('upload failed', error);
     return errorResponse(400, 'upload_failed', 'upload failed');
   }
@@ -177,10 +196,10 @@ export async function handleUpload(ctx: Ctx, actor: UploadActor): Promise<Respon
   try {
     await run(
       env,
-      `INSERT INTO assets (hash, object_key, filename, content_type, size, etag, note, tags, key_id,
-                           uploader_ip, uploader_agent, created_at, expires_at, downloads)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
-      hash,
+      `INSERT INTO assets (hash, object_key, filename, content_type, size, etag, note, tags, project_id, key_id,
+                           uploader_ip, uploader_agent, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      assetHash,
       objectKey,
       filename,
       contentType,
@@ -188,15 +207,23 @@ export async function handleUpload(ctx: Ctx, actor: UploadActor): Promise<Respon
       etag,
       note,
       tagsJson,
+      projectId,
       actor.keyId,
       clientIp(request),
       request.headers.get('user-agent'),
       now,
-      expiresAt,
     );
+    await insertLink(env, {
+      assetHash,
+      expiresAt,
+      createdBy: actor.actor,
+      requestedHash: linkHash,
+      now,
+    });
   } catch (error) {
-    // The row did not commit, so the object would otherwise be orphaned.
     await env.BUCKET.delete(objectKey).catch(() => undefined);
+    await run(env, 'DELETE FROM assets WHERE hash = ?', assetHash).catch(() => undefined);
+    await run(env, 'DELETE FROM links WHERE hash = ?', linkHash).catch(() => undefined);
     if (isUniqueViolation(error)) {
       return errorResponse(409, 'hash_taken', 'that hash is already in use');
     }
@@ -207,26 +234,32 @@ export async function handleUpload(ctx: Ctx, actor: UploadActor): Promise<Respon
     await audit(env, {
       actor: actor.actor,
       action: 'upload',
-      target: hash,
+      target: assetHash,
       ip: clientIp(request),
-      detail: tags.length > 0 ? `${filename} (${size} bytes) [${tags.join(', ')}]` : `${filename} (${size} bytes)`,
+      detail: [
+        `${filename} (${size} bytes) link=${linkHash}`,
+        tags.length > 0 ? `[${tags.join(', ')}]` : '',
+        project ? `project=${project.slug}` : '',
+      ].filter(Boolean).join(' '),
     });
   } catch (error) {
-    // The asset is already durable. Failing the request here would invite a
-    // retry that creates a second object.
     console.error('upload audit failed', error);
   }
 
   return jsonResponse(
     {
-      hash,
+      hash: linkHash,
+      asset_hash: assetHash,
+      link_hash: linkHash,
       filename,
       size,
       content_type: contentType,
       tags,
+      project,
+      note,
       created_at: now,
       expires_at: expiresAt,
-      url: `${env.PUBLIC_BASE_URL}/${hash}/${encodeURIComponent(filename)}`,
+      url: linkUrl(env, linkHash, filename),
     },
     { status: 201 },
   );
