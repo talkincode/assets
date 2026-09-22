@@ -12,7 +12,7 @@ const DEFAULT_IP = '198.18.0.10';
 
 async function upload(
   body: string,
-  options: { key?: string; query?: string; filename?: string; ip?: string } = {},
+  options: { key?: string; query?: string; filename?: string; ip?: string; contentType?: string } = {},
 ) {
   const params = new URLSearchParams(options.query ?? '');
   return SELF.fetch(`${BASE}/api/upload?${params}`, {
@@ -20,7 +20,7 @@ async function upload(
     headers: {
       authorization: `Bearer ${options.key ?? ''}`,
       'x-filename': options.filename ?? 'report.txt',
-      'content-type': 'text/plain',
+      'content-type': options.contentType ?? 'text/plain',
       'content-length': String(new TextEncoder().encode(body).length),
       'cf-connecting-ip': options.ip ?? DEFAULT_IP,
     },
@@ -73,14 +73,17 @@ describe('upload and delivery', () => {
   it('stores bytes under a hash and serves them at any filename', async () => {
     const created = await upload('hello assets', { key });
     expect(created.status).toBe(201);
-    const { hash, url, expires_at: expiresAt } = (await created.json()) as {
+    const { hash, url, expires_at: expiresAt, asset_hash: assetHash } = (await created.json()) as {
       hash: string;
       url: string;
       expires_at: number | null;
+      asset_hash: string;
     };
     expect(hash).toHaveLength(22);
+    expect(assetHash).toHaveLength(22);
+    expect(assetHash).not.toBe(hash);
     expect(url).toContain(`/${hash}/report.txt`);
-    // Default TTL is 7 days.
+    // Default link TTL is 7 days.
     expect(expiresAt! - Date.now()).toBeGreaterThan(6.9 * 86400000);
 
     const served = await SELF.fetch(`${BASE}/${hash}/anything-i-like.txt`);
@@ -200,17 +203,20 @@ describe('upload and delivery', () => {
       upload('two', { key, query }),
     ]);
     expect([first.status, second.status].sort()).toEqual([201, 409]);
-    const row = await env.DB.prepare('SELECT object_key FROM assets WHERE hash = ?')
+    const row = await env.DB.prepare('SELECT asset_hash FROM links WHERE hash = ?')
       .bind('RaceHashValue123456')
+      .first<{ asset_hash: string }>();
+    expect(row?.asset_hash).toBeTruthy();
+    const asset = await env.DB.prepare('SELECT object_key FROM assets WHERE hash = ?')
+      .bind(row!.asset_hash)
       .first<{ object_key: string }>();
-    expect(row?.object_key).toBeTruthy();
-    expect(await env.BUCKET.head(row!.object_key)).not.toBeNull();
+    expect(await env.BUCKET.head(asset!.object_key)).not.toBeNull();
   });
 
   it('stores tags on upload, filters by tag, and lets admin edit them', async () => {
     const created = await upload('tagged body', { key, query: 'tags=课件,PDF&expires_in=7d' });
     expect(created.status).toBe(201);
-    const body = (await created.json()) as { hash: string; tags: string[] };
+    const body = (await created.json()) as { hash: string; asset_hash: string; tags: string[] };
     expect(body.tags).toEqual(['课件', 'PDF']);
 
     const token = await signAccessJwt({ email: TEST_EMAIL });
@@ -221,14 +227,14 @@ describe('upload and delivery', () => {
     });
     expect(listed.status).toBe(200);
     const listBody = (await listed.json()) as { assets: { hash: string; tags: string[] }[] };
-    expect(listBody.assets.some((asset) => asset.hash === body.hash)).toBe(true);
+    expect(listBody.assets.some((asset) => asset.hash === body.asset_hash)).toBe(true);
 
     const tags = await SELF.fetch(`${BASE}/admin/api/tags`, { headers: auth });
     expect(tags.status).toBe(200);
     const tagBody = (await tags.json()) as { tags: { tag: string; count: number }[] };
     expect(tagBody.tags.some((row) => row.tag === '课件' && row.count >= 1)).toBe(true);
 
-    const patched = await SELF.fetch(`${BASE}/admin/api/assets/${body.hash}`, {
+    const patched = await SELF.fetch(`${BASE}/admin/api/assets/${body.asset_hash}`, {
       method: 'PATCH',
       headers: auth,
       body: JSON.stringify({ tags: '微课' }),
@@ -236,7 +242,7 @@ describe('upload and delivery', () => {
     expect(patched.status).toBe(200);
     expect(((await patched.json()) as { asset: { tags: string[] } }).asset.tags).toEqual(['微课']);
 
-    const cleared = await SELF.fetch(`${BASE}/admin/api/assets/${body.hash}`, {
+    const cleared = await SELF.fetch(`${BASE}/admin/api/assets/${body.asset_hash}`, {
       method: 'PATCH',
       headers: auth,
       body: JSON.stringify({ tags: '' }),
@@ -244,9 +250,61 @@ describe('upload and delivery', () => {
     expect(((await cleared.json()) as { asset: { tags: string[] } }).asset.tags).toEqual([]);
   });
 
-  it('batch-updates tags and expiry, and rotates hashes', async () => {
-    const first = (await (await upload('batch-one', { key, query: 'tags=旧标签' })).json()) as { hash: string };
-    const second = (await (await upload('batch-two', { key })).json()) as { hash: string };
+  it('creates projects, assigns on upload, and filters by project slug', async () => {
+    const token = await signAccessJwt({ email: TEST_EMAIL });
+    const auth = { 'cf-access-jwt-assertion': token, 'content-type': 'application/json' };
+
+    const createdProject = await SELF.fetch(`${BASE}/admin/api/projects`, {
+      method: 'POST',
+      headers: auth,
+      body: JSON.stringify({ slug: 'li-cui', name: '李翠' }),
+    });
+    expect(createdProject.status).toBe(201);
+    const projectBody = (await createdProject.json()) as {
+      project: { id: string; slug: string; name: string };
+    };
+    expect(projectBody.project.slug).toBe('li-cui');
+    expect(projectBody.project.name).toBe('李翠');
+
+    const uploaded = await upload('project-body', {
+      key,
+      query: 'project=li-cui&expires_in=7d',
+      filename: 'li-cui.png',
+    });
+    expect(uploaded.status).toBe(201);
+    const upBody = (await uploaded.json()) as {
+      asset_hash: string;
+      project: { slug: string; name: string } | null;
+    };
+    expect(upBody.project?.slug).toBe('li-cui');
+
+    const listed = await SELF.fetch(`${BASE}/admin/api/assets?project=li-cui`, { headers: auth });
+    expect(listed.status).toBe(200);
+    const listBody = (await listed.json()) as {
+      assets: { hash: string; project: { slug: string } | null }[];
+    };
+    expect(listBody.assets.some((row) => row.hash === upBody.asset_hash && row.project?.slug === 'li-cui')).toBe(true);
+
+    const none = await SELF.fetch(`${BASE}/admin/api/assets?project=none&status=live`, { headers: auth });
+    expect(none.status).toBe(200);
+    const noneBody = (await none.json()) as { assets: { hash: string; project: unknown }[] };
+    expect(noneBody.assets.every((row) => row.project === null)).toBe(true);
+
+    const cleared = await SELF.fetch(`${BASE}/admin/api/assets/${upBody.asset_hash}`, {
+      method: 'PATCH',
+      headers: auth,
+      body: JSON.stringify({ project: 'none' }),
+    });
+    expect(cleared.status).toBe(200);
+    expect(((await cleared.json()) as { asset: { project: unknown } }).asset.project).toBeNull();
+  });
+
+  it('batch-updates tags and creates share links', async () => {
+    const first = (await (await upload('batch-one', { key, query: 'tags=旧标签' })).json()) as {
+      hash: string;
+      asset_hash: string;
+    };
+    const second = (await (await upload('batch-two', { key })).json()) as { hash: string; asset_hash: string };
     const token = await signAccessJwt({ email: TEST_EMAIL });
     const auth = { 'cf-access-jwt-assertion': token, 'content-type': 'application/json' };
 
@@ -254,35 +312,37 @@ describe('upload and delivery', () => {
       method: 'POST',
       headers: auth,
       body: JSON.stringify({
-        hashes: [first.hash, second.hash],
+        hashes: [first.asset_hash, second.asset_hash],
         tags: '批量,共享',
         tags_mode: 'replace',
-        expires_in: '1d',
       }),
     });
     expect(updated.status).toBe(200);
     const updatedBody = (await updated.json()) as {
       updated: number;
-      results: { hash: string; tags: string[]; expires_at: number }[];
+      results: { hash: string; tags: string[] }[];
     };
     expect(updatedBody.updated).toBe(2);
     expect(updatedBody.results.every((row) => row.tags.includes('批量'))).toBe(true);
 
-    const rotated = await SELF.fetch(`${BASE}/admin/api/assets/batch`, {
+    const linked = await SELF.fetch(`${BASE}/admin/api/assets/batch`, {
       method: 'POST',
       headers: auth,
-      body: JSON.stringify({ hashes: [first.hash, second.hash], rotate: true }),
+      body: JSON.stringify({
+        hashes: [first.asset_hash, second.asset_hash],
+        create_links: true,
+        expires_in: '1d',
+      }),
     });
-    expect(rotated.status).toBe(200);
-    const rotatedBody = (await rotated.json()) as {
-      results: { hash: string; previous_hash: string }[];
+    expect(linked.status).toBe(200);
+    const linkedBody = (await linked.json()) as {
+      results: { url: string; link: { hash: string } }[];
     };
-    expect(rotatedBody.results).toHaveLength(2);
+    expect(linkedBody.results).toHaveLength(2);
     const probe = { 'cf-connecting-ip': '198.18.0.50' };
-    for (const row of rotatedBody.results) {
-      expect(row.hash).not.toBe(row.previous_hash);
-      expect((await SELF.fetch(`${BASE}/${row.previous_hash}/x.txt`, { headers: probe })).status).toBe(404);
-      expect((await SELF.fetch(`${BASE}/${row.hash}/x.txt`, { headers: probe })).status).toBe(200);
+    for (const row of linkedBody.results) {
+      expect(row.link.hash).toBeTruthy();
+      expect((await SELF.fetch(`${BASE}/${row.link.hash}/x.txt`, { headers: probe })).status).toBe(200);
     }
   });
 
@@ -303,27 +363,32 @@ describe('upload and delivery', () => {
     expect((await upload('nope', { key: 'ak_wrong' })).status).toBe(401);
   });
 
-  it('honours expires_in, and reports 410 both before and after the sweep', async () => {
+  it('honours link expires_in and keeps asset bytes after the link expires', async () => {
     const created = await upload('short lived', { key, query: 'expires_in=1s' });
-    const { hash } = (await created.json()) as { hash: string };
+    const { hash, asset_hash: assetHash } = (await created.json()) as { hash: string; asset_hash: string };
     expect((await SELF.fetch(`${BASE}/${hash}/s.txt`)).status).toBe(200);
 
-    await env.DB.prepare('UPDATE assets SET expires_at = ? WHERE hash = ?').bind(Date.now() - 1000, hash).run();
+    await env.DB.prepare('UPDATE links SET expires_at = ? WHERE hash = ?').bind(Date.now() - 1000, hash).run();
     expect((await SELF.fetch(`${BASE}/${hash}/s.txt`)).status).toBe(410);
 
-    // The hourly sweep tombstones it and drops the bytes; the answer must not
-    // change just because housekeeping ran.
-    await env.DB.prepare('UPDATE assets SET deleted_at = ?, delete_reason = ?, purged_at = ? WHERE hash = ?')
-      .bind(Date.now(), 'expired', Date.now(), hash)
-      .run();
-    expect((await SELF.fetch(`${BASE}/${hash}/s.txt`)).status).toBe(410);
+    // Asset bytes remain; a fresh link can still serve them.
+    const token = await signAccessJwt({ email: TEST_EMAIL });
+    const minted = await SELF.fetch(`${BASE}/admin/api/assets/${assetHash}/links`, {
+      method: 'POST',
+      headers: { 'cf-access-jwt-assertion': token, 'content-type': 'application/json' },
+      body: JSON.stringify({ expires_in: '1d' }),
+    });
+    expect(minted.status).toBe(201);
+    const newLink = ((await minted.json()) as { link: { hash: string } }).link.hash;
+    expect((await SELF.fetch(`${BASE}/${newLink}/s.txt`)).status).toBe(200);
   });
 
-  it('supports never-expiring uploads and custom hashes', async () => {
+  it('supports never-expiring links and custom link hashes', async () => {
     const created = await upload('forever', { key, query: 'expires_in=never&hash=CustomHashValue12345' });
     expect(created.status).toBe(201);
-    const body = (await created.json()) as { hash: string; expires_at: number | null };
+    const body = (await created.json()) as { hash: string; asset_hash: string; expires_at: number | null };
     expect(body.hash).toBe('CustomHashValue12345');
+    expect(body.asset_hash).not.toBe(body.hash);
     expect(body.expires_at).toBeNull();
     expect((await SELF.fetch(`${BASE}/CustomHashValue12345/f.txt`)).status).toBe(200);
 
@@ -405,49 +470,123 @@ describe('admin API and Cloudflare Access', () => {
     expect(response.status).toBe(401);
   });
 
-  it('drives the lifecycle: list, update expiry, rotate, delete, restore, purge', async () => {
+  it('reads and saves markdown content from the dashboard editor', async () => {
+    const token = await signAccessJwt({ email: TEST_EMAIL });
+    const auth = { 'cf-access-jwt-assertion': token };
+    const created = await upload('# Hello\n\nworld', {
+      key,
+      filename: 'note.md',
+      contentType: 'text/markdown; charset=utf-8',
+      query: 'expires_in=1d',
+    });
+    expect(created.status).toBe(201);
+    const { hash: linkHash, asset_hash: assetHash } = (await created.json()) as {
+      hash: string;
+      asset_hash: string;
+    };
+
+    const detail = await SELF.fetch(`${BASE}/admin/api/assets/${assetHash}`, { headers: auth });
+    const detailBody = (await detail.json()) as { asset: { editable_text: boolean; markdown: boolean } };
+    expect(detailBody.asset.editable_text).toBe(true);
+    expect(detailBody.asset.markdown).toBe(true);
+
+    const got = await SELF.fetch(`${BASE}/admin/api/assets/${assetHash}/content`, { headers: auth });
+    expect(got.status).toBe(200);
+    expect(await got.text()).toBe('# Hello\n\nworld');
+
+    const next = new TextEncoder().encode('# Updated\n\nbody');
+    const saved = await SELF.fetch(`${BASE}/admin/api/assets/${assetHash}/content`, {
+      method: 'PUT',
+      headers: {
+        ...auth,
+        'content-type': 'text/markdown; charset=utf-8',
+        'content-length': String(next.byteLength),
+      },
+      body: next,
+    });
+    expect(saved.status).toBe(200);
+    const savedBody = (await saved.json()) as { asset: { size: number; markdown: boolean } };
+    expect(savedBody.asset.markdown).toBe(true);
+    expect(savedBody.asset.size).toBe(next.byteLength);
+    expect(await (await SELF.fetch(`${BASE}/${linkHash}/note.md`)).text()).toBe('# Updated\n\nbody');
+
+    const empty = await SELF.fetch(`${BASE}/admin/api/assets/${assetHash}/content`, {
+      method: 'PUT',
+      headers: { ...auth, 'content-type': 'text/markdown; charset=utf-8', 'content-length': '0' },
+      body: '',
+    });
+    expect(empty.status).toBe(400);
+
+    const html = await upload('<b>x</b>', { key, filename: 'x.html', contentType: 'text/html' });
+    const htmlAsset = ((await html.json()) as { asset_hash: string }).asset_hash;
+    expect((await SELF.fetch(`${BASE}/admin/api/assets/${htmlAsset}/content`, { headers: auth })).status).toBe(415);
+  });
+
+  it('manages independent share links and asset lifecycle', async () => {
     const token = await signAccessJwt({ email: TEST_EMAIL });
     const auth = { 'cf-access-jwt-assertion': token, 'content-type': 'application/json' };
     const created = await upload('lifecycle body', { key, query: 'expires_in=1d' });
-    const { hash } = (await created.json()) as { hash: string };
+    const { hash: firstLink, asset_hash: assetHash } = (await created.json()) as {
+      hash: string;
+      asset_hash: string;
+    };
 
     const listed = await SELF.fetch(`${BASE}/admin/api/assets?status=live`, { headers: auth });
     expect(listed.status).toBe(200);
     expect(((await listed.json()) as { total: number }).total).toBeGreaterThan(0);
 
-    const patched = await SELF.fetch(`${BASE}/admin/api/assets/${hash}`, {
-      method: 'PATCH',
+    const second = await SELF.fetch(`${BASE}/admin/api/assets/${assetHash}/links`, {
+      method: 'POST',
       headers: auth,
-      body: JSON.stringify({ expires_in: '30d' }),
+      body: JSON.stringify({ expires_in: '30d', label: 'channel-b' }),
     });
-    expect(patched.status).toBe(200);
-    expect(((await patched.json()) as { asset: { expires_at: number } }).asset.expires_at).toBeGreaterThan(
-      Date.now() + 29 * 86400000,
-    );
+    expect(second.status).toBe(201);
+    const secondLink = ((await second.json()) as { link: { hash: string; expires_at: number } }).link;
+    expect(secondLink.expires_at).toBeGreaterThan(Date.now() + 29 * 86400000);
+    expect((await SELF.fetch(`${BASE}/${firstLink}/x.txt`)).status).toBe(200);
+    expect((await SELF.fetch(`${BASE}/${secondLink.hash}/x.txt`)).status).toBe(200);
 
-    const rotated = await SELF.fetch(`${BASE}/admin/api/assets/${hash}/rotate`, { method: 'POST', headers: auth, body: '{}' });
-    const rotatedBody = (await rotated.json()) as { asset: { hash: string; url: string }; previous_hash: string };
-    expect(rotatedBody.asset.hash).not.toBe(hash);
-    expect((await SELF.fetch(`${BASE}/${hash}/x.txt`)).status).toBe(404);
-    expect((await SELF.fetch(`${BASE}/${rotatedBody.asset.hash}/x.txt`)).status).toBe(200);
+    const revoked = await SELF.fetch(`${BASE}/admin/api/links/${firstLink}`, { method: 'DELETE', headers: auth });
+    expect(revoked.status).toBe(200);
+    expect((await SELF.fetch(`${BASE}/${firstLink}/x.txt`)).status).toBe(404);
+    expect((await SELF.fetch(`${BASE}/${secondLink.hash}/x.txt`)).status).toBe(200);
 
-    const nextHash = rotatedBody.asset.hash;
-    const deleted = await SELF.fetch(`${BASE}/admin/api/assets/${nextHash}`, { method: 'DELETE', headers: auth });
+    const tempOk = await SELF.fetch(`${BASE}/admin/api/assets/${assetHash}/temp-link`, {
+      method: 'POST',
+      headers: auth,
+      body: JSON.stringify({ expires_in: '1h' }),
+    });
+    expect(tempOk.status).toBe(201);
+    const tempDenied = await SELF.fetch(`${BASE}/admin/api/assets/${assetHash}/temp-link`, {
+      method: 'POST',
+      headers: auth,
+      body: JSON.stringify({ expires_in: '5h' }),
+    });
+    expect(tempDenied.status).toBe(400);
+
+    const deleted = await SELF.fetch(`${BASE}/admin/api/assets/${assetHash}`, { method: 'DELETE', headers: auth });
     expect(deleted.status).toBe(200);
-    expect((await SELF.fetch(`${BASE}/${nextHash}/x.txt`)).status).toBe(404);
+    expect((await SELF.fetch(`${BASE}/${secondLink.hash}/x.txt`)).status).toBe(404);
 
-    const restored = await SELF.fetch(`${BASE}/admin/api/assets/${nextHash}/restore`, {
+    const restored = await SELF.fetch(`${BASE}/admin/api/assets/${assetHash}/restore`, {
+      method: 'POST',
+      headers: auth,
+      body: '{}',
+    });
+    expect(restored.status).toBe(200);
+    // Restored asset needs a new link to be publicly reachable again.
+    const fresh = await SELF.fetch(`${BASE}/admin/api/assets/${assetHash}/links`, {
       method: 'POST',
       headers: auth,
       body: JSON.stringify({ expires_in: '7d' }),
     });
-    expect(restored.status).toBe(200);
-    expect((await SELF.fetch(`${BASE}/${nextHash}/x.txt`)).status).toBe(200);
+    const freshHash = ((await fresh.json()) as { link: { hash: string } }).link.hash;
+    expect((await SELF.fetch(`${BASE}/${freshHash}/x.txt`)).status).toBe(200);
 
-    const purged = await SELF.fetch(`${BASE}/admin/api/assets/${nextHash}?purge=1`, { method: 'DELETE', headers: auth });
+    const purged = await SELF.fetch(`${BASE}/admin/api/assets/${assetHash}?purge=1`, { method: 'DELETE', headers: auth });
     expect(purged.status).toBe(200);
-    expect((await SELF.fetch(`${BASE}/${nextHash}/x.txt`)).status).toBe(404);
-    const row = await env.DB.prepare('SELECT COUNT(*) AS n FROM assets WHERE hash = ?').bind(nextHash).first<{ n: number }>();
+    expect((await SELF.fetch(`${BASE}/${freshHash}/x.txt`)).status).toBe(404);
+    const row = await env.DB.prepare('SELECT COUNT(*) AS n FROM assets WHERE hash = ?').bind(assetHash).first<{ n: number }>();
     expect(row?.n).toBe(0);
   });
 

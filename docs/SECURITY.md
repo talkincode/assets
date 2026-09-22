@@ -26,6 +26,9 @@
 
 - Access 应用只覆盖 `assets.talkincode.net/admin`（含 `/admin/api/*`），策略为
   `allow` + 邮箱白名单 `jamiesun.net@gmail.com`，会话 24 小时；
+- 登录推荐 **Email One-time PIN**（`setup-access.sh` 会创建 OTP IdP）。新 Zero Trust
+  组织默认是 Cloudflare 账号登录，不会自动带上 OTP；
+- 退出：dashboard「退出登录」→ `/cdn-cgi/access/logout`（清 Access cookie）；
 - Worker **不信任**边缘结果，每个管理请求都会：
   1. 取 `Cf-Access-Jwt-Assertion`，用团队域发布（并缓存 10 分钟）的 JWKS 按 `kid` 验签（RS256）；
   2. 校验 `aud` 必须等于本应用的 AUD，`iss` 必须是 `https://<ACCESS_TEAM_DOMAIN>`；

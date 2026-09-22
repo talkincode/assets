@@ -1,6 +1,6 @@
 # CLI
 
-`cli/assets.mjs`：零依赖、纯 Node（≥20），给人和 agent 用。
+`cli/assets.mjs`：零依赖、纯 Node（≥20），面向人和 **agent**。
 
 ```bash
 ./cli/assets.mjs help
@@ -11,13 +11,8 @@
 | 变量 | 必需 | 说明 |
 | --- | --- | --- |
 | `ASSETS_BASE_URL` | 否 | 默认 `https://assets.talkincode.net` |
-| `ASSETS_KEY` | `put` 需要 | 上传密钥（dashboard 创建，或 `scripts/bootstrap-key.mjs`） |
-| `CF_ACCESS_CLIENT_ID` | 管理命令需要 | Access Service Token client id |
-| `CF_ACCESS_CLIENT_SECRET` | 管理命令需要 | Access Service Token secret |
-
-CLI 会自动读取工作目录下的 `.env`（已存在的环境变量优先），
-也可以用 `--base-url`、`--env-file` 覆盖。部署时 `access:setup --service-token` 会把
-Access service token 写到 `~/.config/talkincode-assets/env`（600），所以管理命令通常这样跑：
+| `ASSETS_KEY` | `put` 需要 | 上传密钥 |
+| `CF_ACCESS_CLIENT_ID` / `SECRET` | 管理命令需要 | Access Service Token |
 
 ```bash
 ./cli/assets.mjs --env-file ~/.config/talkincode-assets/env ls
@@ -25,82 +20,52 @@ Access service token 写到 `~/.config/talkincode-assets/env`（600），所以�
 
 ## 输出约定
 
-- 默认：人类可读摘要
+- 默认：人类可读
 - `--json`：完整 JSON（agent 首选）
-- `-q` / `--quiet`：只输出一个值（URL、id），方便 `$(...)` 捕获
+- `-q` / `--quiet`：只输出一个值（通常是 URL 或 asset hash）
 
-## 命令
+## Agent 工作流（推荐）
 
-### 上传
+资产不过期；对外只发 **临时分享链接**（服务端硬上限 **4 小时**）。
 
 ```bash
-./cli/assets.mjs put ./demo.mp4 --expire 7d --note "产品演示" --tags "demo,product"
-./cli/assets.mjs put ./report.pdf --expire never
-./cli/assets.mjs put ./image.png --name hero-shot.png --expire 30d --tags 封面
-cat ./log.txt | ./cli/assets.mjs put - --name run.log --expire 1d
-URL=$(./cli/assets.mjs put ./a.png -q)
-./cli/assets.mjs put ./a.png --expire 7d --json | jq -r .url
-./cli/assets.mjs ls --tag demo
+# 1) 上传（返回首链 URL；--json 含 asset_hash）
+./cli/assets.mjs put ./doc.pdf --expire 7d --json
+
+# 2) 检索已有资产（可按项目定向；输出 hash + 备注）
+./cli/assets.mjs find "季度报告" --project coollearn --json
+./cli/assets.mjs ls --project coollearn --status live --json
+./cli/assets.mjs note "$ASSET_HASH" "agent: 已核对页码"
+./cli/assets.mjs projects --json
+
+# 3) 开临时链（默认 1h，最大 4h）；-q 只打 URL
+URL=$(./cli/assets.mjs --env-file ~/.config/talkincode-assets/env \
+  temp <asset_hash|文件名关键词> --project coollearn --expire 1h -q)
+
+# 超过 4h 会被 CLI 与服务端同时拒绝
+./cli/assets.mjs temp "$ASSET_HASH" --expire 5h   # error
 ```
 
-`--expire` 支持 `30m` / `12h` / `7d` / `2w` / 秒数 / `never`；省略则用服务端默认值。
-`--tags` 为逗号分隔标签（最多 16 个）；`ls --tag` 按单个标签精确筛选。
+## 命令摘要
 
-### 查询与管理（需要 Access Service Token）
-
-```bash
-./cli/assets.mjs ls --status live --limit 20
-./cli/assets.mjs ls --kind video --q demo --json
-./cli/assets.mjs show 9fK2mQ7dLpR1sVx8YzA3bC
-./cli/assets.mjs expire 9fK2mQ7dLpR1sVx8YzA3bC 30d
-./cli/assets.mjs expire 9fK2mQ7dLpR1sVx8YzA3bC never
-./cli/assets.mjs rotate 9fK2mQ7dLpR1sVx8YzA3bC          # 随机新 hash
-./cli/assets.mjs rotate 9fK2mQ7dLpR1sVx8YzA3bC --hash NewHashValue1234567
-./cli/assets.mjs rm 9fK2mQ7dLpR1sVx8YzA3bC              # 软删除，可恢复
-./cli/assets.mjs rm 9fK2mQ7dLpR1sVx8YzA3bC --hard       # 彻底删除
-./cli/assets.mjs restore 9fK2mQ7dLpR1sVx8YzA3bC --expire 7d
-```
-
-### 密钥
+| 命令 | 作用 |
+| --- | --- |
+| `put <file>` | 上传：建资产 + 首链；`--expire` 管首链 TTL；`--project SLUG` 归属 |
+| `find <query>` / `ls` | 检索资产；输出 `asset_hash`、备注、文件名；支持 `--project` |
+| `note <asset_hash> <text>` | 写入 / 更新备注（`--clear` 清空；`-` 从 stdin） |
+| `projects` / `project-create` / `project-set` | 项目列表、创建、改归属 |
+| `show <asset_hash>` | 资产详情 + 全部链接 |
+| `temp <asset\|query>` | **临时链** ≤4h（agent 主入口）；可加 `--project` 缩小检索 |
+| `link <asset_hash>` | 普通分享链（可 `7d` / `never`） |
+| `links <asset_hash>` | 列出链接 |
+| `revoke <link_hash>` | 吊销单条链接 |
+| `rm` / `restore` | 删 / 恢复 **资产** |
+| `url <link_hash>` | 拼公开 URL |
 
 ```bash
-./cli/assets.mjs keys
-./cli/assets.mjs key-create agent-ci        # 只显示一次 secret
-./cli/assets.mjs key-revoke <key-id>
-```
-
-### 安全
-
-```bash
-./cli/assets.mjs blocked
-./cli/assets.mjs unblock 203.0.113.0%2F24
-```
-
-### 其他
-
-```bash
-./cli/assets.mjs url 9fK2mQ7dLpR1sVx8YzA3bC demo.mp4   # 只拼外链，不请求服务端
-./cli/assets.mjs whoami
-./cli/assets.mjs health
-```
-
-## Agent 用法示例
-
-```bash
-# 上传产物并把外链交给下一步
-URL=$(ASSETS_KEY=ak_... ./cli/assets.mjs put ./out/video.mp4 --expire 3d -q)
-echo "$URL" >> artifacts.txt
-
-# 收集一批文件的 hash，便于后续统一改期或删除
-for f in ./out/*.png; do
-  ./cli/assets.mjs put "$f" --expire 30d --json | jq -r '[.hash, .filename, .url] | @tsv'
-done
-```
-
-退出码：`0` 成功，`1` 失败（原因写 stderr）。被封禁时提示里会说明是反滥用机制。
-
-## 安装为全局命令（可选）
-
-```bash
-npm link          # 之后可直接用 `assets put ...`
+./cli/assets.mjs put ./a.png --expire 7d -q
+./cli/assets.mjs link "$ASSET_HASH" --expire 30d --label wechat -q
+./cli/assets.mjs links "$ASSET_HASH" --json
+./cli/assets.mjs revoke "$LINK_HASH"
+./cli/assets.mjs rm "$ASSET_HASH"
 ```

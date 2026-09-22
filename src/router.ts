@@ -50,6 +50,10 @@ export class Router {
     return this.add('PATCH', pattern, handler);
   }
 
+  put(pattern: string, handler: Handler): this {
+    return this.add('PUT', pattern, handler);
+  }
+
   delete(pattern: string, handler: Handler): this {
     return this.add('DELETE', pattern, handler);
   }

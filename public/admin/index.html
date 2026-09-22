@@ -2,63 +2,155 @@
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="robots" content="noindex, nofollow" />
+    <meta name="theme-color" content="#0b0d10" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#f5f6f8" media="(prefers-color-scheme: light)" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Assets" />
+    <meta name="mobile-web-app-capable" content="yes" />
     <title>Talkincode Assets</title>
-    <link rel="icon" href="/favicon.svg" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/admin/icons/apple-touch-icon.png" />
+    <link rel="manifest" href="/admin/manifest.webmanifest" />
     <script>
-      // Set the theme before first paint so the page never flashes dark.
       try {
         var saved = localStorage.getItem('assets-theme');
         if (!saved) saved = matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
         document.documentElement.dataset.theme = saved;
+        var meta = document.querySelector('meta[name="theme-color"]:not([media])')
+          || document.createElement('meta');
+        if (!meta.parentNode) {
+          meta.setAttribute('name', 'theme-color');
+          document.head.appendChild(meta);
+        }
+        meta.setAttribute('content', saved === 'light' ? '#f5f6f8' : '#0b0d10');
       } catch (e) {}
     </script>
     <link rel="stylesheet" href="/admin/style.css" />
   </head>
   <body>
-    <div class="layout">
-      <aside class="sidebar">
-        <div class="brand">
-          <span class="brand-dot"></span>
-          <div>
-            <strong>Assets</strong>
-            <span class="muted" id="brand-host">talkincode.net</span>
+    <div class="layout" id="layout">
+      <div class="sidebar-backdrop" id="sidebar-backdrop" hidden></div>
+
+      <aside class="sidebar" id="sidebar" aria-label="主导航">
+        <div class="sidebar-head">
+          <div class="brand">
+            <span class="brand-mark" aria-hidden="true">
+              <svg viewBox="0 0 32 32" width="18" height="18"><path d="M9 20.5 15 9l2.3 4.6 2.2-3.1L23 20.5z" fill="currentColor"/><circle cx="11.5" cy="12" r="2" fill="currentColor"/></svg>
+            </span>
+            <div class="brand-text">
+              <strong>Assets</strong>
+              <span class="muted" id="brand-host">talkincode.net</span>
+            </div>
           </div>
+          <button type="button" class="icon-btn sidebar-close" id="sidebar-close" aria-label="关闭菜单">
+            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M6.4 17.65 5.35 16.6 10.95 12 5.35 7.4 6.4 6.35 12 11.95l5.6-5.6 1.05 1.05-5.6 5.6 5.6 5.6-1.05 1.05-5.6-5.6z"/></svg>
+          </button>
         </div>
-        <nav id="nav">
-          <button class="nav-item" data-view="assets">资产</button>
-          <button class="nav-item" data-view="upload">上传</button>
-          <button class="nav-item" data-view="keys">上传密钥</button>
-          <button class="nav-item" data-view="abuse">安全防护</button>
-          <button class="nav-item" data-view="settings">设置</button>
+
+        <nav id="nav" class="nav-primary">
+          <button class="nav-item" data-view="assets">
+            <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M4 5.5A1.5 1.5 0 0 1 5.5 4h5.2L12 5.3l1.3-1.3h5.2A1.5 1.5 0 0 1 20 5.5v13A1.5 1.5 0 0 1 18.5 20h-13A1.5 1.5 0 0 1 4 18.5v-13Zm2 1v11h12v-11H6Zm2.5 2.5h7v1.5h-7V9Zm0 3.5h5v1.5h-5V12.5Z"/></svg>
+            <span>资产</span>
+          </button>
+          <button class="nav-item" data-view="upload">
+            <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M11.25 16.5V8.56l-2.72 2.72-1.06-1.06L12 5.69l4.53 4.53-1.06 1.06-2.72-2.72v7.94h-1.5ZM5.5 19.5A1.5 1.5 0 0 1 4 18v-2.25h1.5V18h13v-2.25H20V18a1.5 1.5 0 0 1-1.5 1.5h-13Z"/></svg>
+            <span>上传</span>
+          </button>
+          <button class="nav-item" data-view="keys">
+            <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M14.5 4a4.5 4.5 0 0 1 1.64 8.69l.86.86H19v2.25h2.25V18H19v2.25h-3.75v-2.84l-2.2-2.2A4.5 4.5 0 0 1 14.5 4Zm0 1.5a3 3 0 1 0 0 6 3 3 0 0 0 0-6ZM7.75 13.5A3.75 3.75 0 1 1 7.75 21a3.75 3.75 0 0 1 0-7.5Zm0 1.5a2.25 2.25 0 1 0 0 4.5 2.25 2.25 0 0 0 0-4.5Z"/></svg>
+            <span>上传密钥</span>
+          </button>
+          <button class="nav-item" data-view="abuse">
+            <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 3.25 19.5 6v5.35c0 4.6-3.05 8.55-7.5 9.65-4.45-1.1-7.5-5.05-7.5-9.65V6L12 3.25Zm0 1.7L6 7.05v4.3c0 3.7 2.4 6.9 6 7.9 3.6-1 6-4.2 6-7.9v-4.3l-6-2.1Z"/></svg>
+            <span>安全防护</span>
+          </button>
+          <button class="nav-item" data-view="settings">
+            <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M10.2 3.5h3.6l.35 1.7a6.9 6.9 0 0 1 1.55.9l1.65-.7 1.8 3.1-1.35 1.2c.1.4.15.8.15 1.2s-.05.8-.15 1.2l1.35 1.2-1.8 3.1-1.65-.7a6.9 6.9 0 0 1-1.55.9l-.35 1.7h-3.6l-.35-1.7a6.9 6.9 0 0 1-1.55-.9l-1.65.7-1.8-3.1 1.35-1.2A6.6 6.6 0 0 1 5.5 12c0-.4.05-.8.15-1.2L4.3 9.6l1.8-3.1 1.65.7a6.9 6.9 0 0 1 1.55-.9l.35-1.7ZM12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z"/></svg>
+            <span>设置</span>
+          </button>
         </nav>
-        <div class="tag-nav" id="tag-nav">
-          <div class="tag-nav-label">标签</div>
-          <div class="tag-nav-list" id="tag-nav-list">
-            <div class="muted small">加载中…</div>
+
+        <div class="sidebar-scroll">
+          <div class="side-panel" id="project-nav" data-panel="projects">
+            <div class="side-panel-head">
+              <button type="button" class="side-panel-toggle" data-action="toggle-panel" data-panel="projects" aria-expanded="true">
+                <svg class="chev" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M8.1 9.4 12 13.3l3.9-3.9 1.1 1.1-5 5-5-5z"/></svg>
+                <span class="side-nav-label">项目</span>
+                <span class="side-panel-count muted" id="project-panel-count"></span>
+              </button>
+              <button type="button" class="text-btn" id="project-create-btn">新建</button>
+            </div>
+            <div class="side-panel-body">
+              <input type="search" class="side-filter" id="project-filter" placeholder="筛选项目…" autocomplete="off" />
+              <div class="side-nav-list" id="project-nav-list">
+                <div class="muted small">加载中…</div>
+              </div>
+            </div>
+          </div>
+          <div class="side-panel" id="tag-nav" data-panel="tags">
+            <div class="side-panel-head">
+              <button type="button" class="side-panel-toggle" data-action="toggle-panel" data-panel="tags" aria-expanded="true">
+                <svg class="chev" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M8.1 9.4 12 13.3l3.9-3.9 1.1 1.1-5 5-5-5z"/></svg>
+                <span class="side-nav-label">标签</span>
+                <span class="side-panel-count muted" id="tag-panel-count"></span>
+              </button>
+            </div>
+            <div class="side-panel-body">
+              <input type="search" class="side-filter" id="tag-filter" placeholder="筛选标签…" autocomplete="off" />
+              <div class="side-nav-list" id="tag-nav-list">
+                <div class="muted small">加载中…</div>
+              </div>
+            </div>
           </div>
         </div>
+
         <div class="sidebar-foot">
-          <div class="who" id="who">…</div>
-          <button class="btn ghost small" id="theme-toggle" type="button">主题</button>
-          <a id="base-link" class="muted small" href="#" target="_blank" rel="noreferrer"></a>
+          <div class="who-row">
+            <span class="who-avatar" id="who-avatar" aria-hidden="true">?</span>
+            <div class="who-meta">
+              <div class="who" id="who">…</div>
+              <a id="base-link" class="muted small who-link" href="#" target="_blank" rel="noreferrer"></a>
+            </div>
+          </div>
+          <div class="foot-actions">
+            <button class="btn ghost small" id="theme-toggle" type="button">主题</button>
+            <button class="btn ghost small" id="logout" type="button">退出</button>
+          </div>
         </div>
       </aside>
 
       <main class="main">
         <header class="topbar">
-          <h1 id="view-title">资产</h1>
+          <div class="topbar-lead">
+            <button type="button" class="icon-btn menu-toggle" id="menu-toggle" aria-label="打开菜单" aria-controls="sidebar" aria-expanded="false">
+              <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M4.5 6.75h15v1.5h-15v-1.5Zm0 4.5h15v1.5h-15v-1.5Zm0 4.5h15v1.5h-15v-1.5Z"/></svg>
+            </button>
+            <h1 id="view-title">资产</h1>
+          </div>
           <div class="topbar-tools" id="view-tools"></div>
         </header>
         <section id="view" class="view"></section>
       </main>
     </div>
 
-    <div id="modal" class="modal" hidden>
-      <div class="modal-backdrop" data-close="1"></div>
-      <div class="modal-card" id="modal-card"></div>
-    </div>
+    <nav class="bottom-nav" id="bottom-nav" aria-label="移动快捷导航">
+      <button type="button" class="bottom-nav-item" data-view="assets" data-action="mobile-nav">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M4 5.5A1.5 1.5 0 0 1 5.5 4h5.2L12 5.3l1.3-1.3h5.2A1.5 1.5 0 0 1 20 5.5v13A1.5 1.5 0 0 1 18.5 20h-13A1.5 1.5 0 0 1 4 18.5v-13Z"/></svg>
+        <span>资产</span>
+      </button>
+      <button type="button" class="bottom-nav-item" data-view="upload" data-action="mobile-nav">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M11.25 16.5V8.56l-2.72 2.72-1.06-1.06L12 5.69l4.53 4.53-1.06 1.06-2.72-2.72v7.94h-1.5ZM5.5 19.5A1.5 1.5 0 0 1 4 18v-2.25h1.5V18h13v-2.25H20V18a1.5 1.5 0 0 1-1.5 1.5h-13Z"/></svg>
+        <span>上传</span>
+      </button>
+      <button type="button" class="bottom-nav-item" data-action="open-menu">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M5 7.5h14v1.5H5V7.5Zm0 4h14v1.5H5V11.5Zm0 4h14v1.5H5V15.5Z"/></svg>
+        <span>菜单</span>
+      </button>
+    </nav>
+
     <div id="toasts" class="toasts"></div>
     <script type="module" src="/admin/app.js"></script>
   </body>

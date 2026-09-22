@@ -16,8 +16,10 @@
     "check": "npm run typecheck && npm test",
     "db:init": "wrangler d1 execute talkincode-assets --remote -y --file=./schema.sql",
     "db:init:local": "wrangler d1 execute talkincode-assets --local -y --file=./schema.sql",
-    "db:migrate:tags": "wrangler d1 execute talkincode-assets --remote -y --file=./migrations/001_add_tags.sql",
-    "db:migrate:tags:local": "wrangler d1 execute talkincode-assets --local -y --file=./migrations/001_add_tags.sql",
+    "db:migrate:links": "wrangler d1 execute talkincode-assets --remote -y --file=./migrations/002_share_links.sql",
+    "db:migrate:links:local": "wrangler d1 execute talkincode-assets --local -y --file=./migrations/002_share_links.sql",
+    "db:migrate:projects": "wrangler d1 execute talkincode-assets --remote -y --file=./migrations/003_projects.sql",
+    "db:migrate:projects:local": "wrangler d1 execute talkincode-assets --local -y --file=./migrations/003_projects.sql",
     "key:bootstrap": "node scripts/bootstrap-key.mjs",
     "access:setup": "bash scripts/setup-access.sh",
     "smoke": "bash scripts/smoke.sh"

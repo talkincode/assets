@@ -229,6 +229,23 @@ export function isPreviewable(contentType: string): boolean {
   return assetKind(contentType) !== 'other' && assetKind(contentType) !== 'archive';
 }
 
+/** Markdown and plain text that the dashboard may open in the online editor. */
+export function isEditableTextAsset(contentType: string, filename: string): boolean {
+  const type = contentType.split(';')[0].trim().toLowerCase();
+  const name = filename.toLowerCase();
+  if (type.includes('html') || type.includes('javascript') || type.includes('svg+xml')) return false;
+  if (type.includes('markdown') || type === 'text/x-markdown') return true;
+  if (type === 'text/plain' || type.startsWith('text/plain')) return true;
+  if (/\.(md|markdown|mdown|txt)$/.test(name)) return true;
+  return false;
+}
+
+export function isMarkdownAsset(contentType: string, filename: string): boolean {
+  const type = contentType.split(';')[0].trim().toLowerCase();
+  const name = filename.toLowerCase();
+  return type.includes('markdown') || type === 'text/x-markdown' || /\.(md|markdown|mdown)$/.test(name);
+}
+
 const ACTIVE_CONTENT_TYPES = new Set([
   'text/html',
   'application/xhtml+xml',
@@ -249,6 +266,43 @@ export function isActiveContent(contentType: string): boolean {
 
 export const MAX_TAGS = 16;
 export const MAX_TAG_LENGTH = 40;
+
+export const MAX_PROJECT_SLUG_LENGTH = 40;
+export const MAX_PROJECT_NAME_LENGTH = 80;
+
+/**
+ * Project slugs are CLI / filter locators: lowercase `[a-z0-9][a-z0-9_-]*`.
+ * Accepts "Cool Learn" → "cool-learn". Empty input throws.
+ */
+export function normalizeProjectSlug(input: unknown): string {
+  if (input === null || input === undefined) {
+    throw new HttpError(400, 'invalid_project_slug', 'project slug is required');
+  }
+  const raw = String(input)
+    .normalize('NFC')
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f]/g, '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_]+/g, '-')
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  if (raw.length < 2) {
+    throw new HttpError(400, 'invalid_project_slug', 'slug must be at least 2 characters');
+  }
+  if (raw.length > MAX_PROJECT_SLUG_LENGTH) {
+    throw new HttpError(
+      400,
+      'invalid_project_slug',
+      `slug must be at most ${MAX_PROJECT_SLUG_LENGTH} characters`,
+    );
+  }
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(raw)) {
+    throw new HttpError(400, 'invalid_project_slug', 'slug must start with a letter or digit');
+  }
+  return raw;
+}
 
 /**
  * Tags are for dashboard grouping, not security. Commas separate them on the

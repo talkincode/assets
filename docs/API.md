@@ -2,97 +2,93 @@
 
 所有时间戳都是 Unix 毫秒。错误响应统一为 `{ "error": "<code>", "message": "<英文说明>" }`。
 
+## 模型：资产 vs 分享链接
+
+- **资产**（`assets.hash`）：不可变身份，字节一直保留，仅人工删除。**不是**公开外链。
+- **分享链接**（`links.hash`）：公开定位器；`/<hash>/<filename>` 只解析链接 hash。
+  每条链接自有 `expires_at` / 吊销，互不影响。
+- 上传会创建资产 + **第一条链接**；响应里的 `hash` / `url` 指这条链接，另有 `asset_hash`。
+
 ## 公开接口
 
 ### `GET|HEAD /<hash>/<filename?>`
 
-返回文件。`filename` 只影响 `Content-Disposition`（下载名），不参与定位；省略时会用
-上传时的原始文件名。
+`hash` 是 **链接** 定位器。`filename` 只影响 `Content-Disposition`。
 
-- 支持 `Range`（206 + `Content-Range`）、`If-None-Match`（304）、`ETag`、`HEAD`。
-- `?dl=1` 强制 `attachment`（默认图片/音视频/纯文本等可预览类型是 `inline`）。
-  HTML、XHTML、SVG、XML、JavaScript 一律 `attachment`，`?inline=1` 不能改回 inline。
-- 每条资产响应都带 `X-Content-Type-Options: nosniff` 和 `Content-Security-Policy: sandbox`。
-- 响应头带 `Access-Control-Allow-Origin: *`，可直接在网页里引用图片、音视频。
-- 状态码：`200` / `206` / `304` / `404`（不存在、已删除）/ `410`（已过期）/
-  `403`（来源被封禁，带 `Retry-After`；已存在的文件同样拒绝）。
+- 支持 `Range`（206）、`If-None-Match`（304）、`ETag`、`HEAD`。
+- `?dl=1` 强制 `attachment`；HTML/SVG/XML/JS 一律 `attachment`。
+- `X-Content-Type-Options: nosniff`、`Content-Security-Policy: sandbox`、CORS `*`。
+- 状态码：`200` / `206` / `304` / `404`（无此链接、已吊销、资产已删）/
+  `410`（链接过期）/ `403`（来源被封禁）。
 
 ### `POST /api/upload`
 
 | 位置 | 名称 | 说明 |
 | --- | --- | --- |
-| Header | `Authorization: Bearer <上传密钥>` | 也可用 `X-Assets-Key`。密钥不接受放在 URL 里 |
-| Header | `Content-Type` | 决定存储的 MIME；缺省时按扩展名推断 |
-| Header | `Content-Length` | 必填。没有长度的 chunked 请求直接 `411` |
-| Header/Query | `X-Filename` / `?filename=` / `Content-Disposition` | 下载名 |
-| Query | `expires_in`（或 `ttl`） | `30m` / `12h` / `7d` / `2w` / 秒数 / `never` |
-| Query | `expires_at` | 绝对时间（ISO 或 epoch） |
-| Query | `hash` | 自定义 hash：16–64 位 `[A-Za-z0-9_-]` |
-| Query | `note` | 备注，dashboard 可见 |
-| Query | `tags` | 标签，逗号分隔（也可用中文逗号）；最多 16 个，每个最多 40 字符 |
-
-```bash
-curl -X POST "https://assets.talkincode.net/api/upload?expires_in=7d&filename=demo.mp4" \
-  -H "Authorization: Bearer $ASSETS_KEY" \
-  -H "Content-Type: video/mp4" \
-  --data-binary @demo.mp4
-```
+| Header | `Authorization: Bearer <上传密钥>` | 也可用 `X-Assets-Key` |
+| Header | `Content-Type` | 存储 MIME；缺省按扩展名推断 |
+| Header | `Content-Length` | 必填 |
+| Header/Query | `X-Filename` / `?filename=` | 下载名 |
+| Query | `expires_in` / `ttl` / `expires_at` / `never` | **首条链接** 的过期（资产本身不过期） |
+| Query | `hash` | 自定义 **链接** hash（16–64 位 `[A-Za-z0-9_-]`） |
+| Query | `note` / `tags` | 备注与标签（挂在资产上） |
+| Query | `project` / `project_id` / Header `X-Project` | 归属项目（slug 或 id） |
 
 ```json
 {
-  "hash": "9fK2mQ7dLpR1sVx8YzA3bC",
+  "hash": "<link_hash>",
+  "asset_hash": "<asset_hash>",
+  "link_hash": "<link_hash>",
   "filename": "demo.mp4",
   "size": 1048576,
   "content_type": "video/mp4",
-  "tags": ["demo", "product"],
+  "tags": ["demo"],
+  "project": { "id": "…", "slug": "coollearn", "name": "Cool Learn" },
+  "note": "季度报告终稿",
   "created_at": 1789000000000,
   "expires_at": 1789604800000,
-  "url": "https://assets.talkincode.net/9fK2mQ7dLpR1sVx8YzA3bC/demo.mp4"
+  "url": "https://assets.talkincode.net/<link_hash>/demo.mp4"
 }
 ```
 
-状态码：`201`、`400`（空 body、非法 hash、畸形文件名）、`401`（密钥无效）、
-`403`（来源被封禁）、`409`（hash 已被占用，含并发冲突）、`411`（缺少 `Content-Length`）、
-`413`（超过大小上限）、`429`（上传过于频繁）。
-
 ### `GET /health`
 
-`{ "status": "ok", "service": "talkincode-assets", "time": 1789000000000 }`
+`{ "status": "ok", "service": "talkincode-assets", "time": … }`
 
 ## 管理接口（`/admin/api/*`，需 Cloudflare Access）
 
-浏览器通过 Access 会话自动带上 `Cf-Access-Jwt-Assertion`；脚本/CI 用 Service Token
-（`CF-Access-Client-Id` + `CF-Access-Client-Secret`）。
-
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/me` | 当前身份与外链前缀 |
-| GET | `/stats` | 总量、占用、按类型分布、封禁数、密钥数 |
-| GET | `/assets` | 列表：`status=live\|expired\|deleted\|all`、`kind`、`tag`、`q`、`limit`、`offset` |
-| POST | `/assets/batch` | 批量：`{hashes, tags?, tags_mode?, expires_in?/never?, rotate?}`，最多 50 个 |
-| GET | `/assets/:hash` | 详情 + 该资产的操作记录 |
-| PATCH | `/assets/:hash` | `{expires_in}` / `{expires_at}` / `{never:true}` / `{filename}` / `{note}` / `{tags}` |
-| POST | `/assets/:hash/rotate` | 换 hash：`{hash?}`，留空则随机；返回新链接与旧链接 |
-| DELETE | `/assets/:hash` | 软删除（字节进回收站）；`?purge=1` 彻底删除 |
-| POST | `/assets/:hash/restore` | 恢复，可同时改期 `{expires_in}` |
-| GET | `/tags` | 有效资产上的标签与数量（dashboard 侧栏导航） |
-| GET/POST | `/keys` | 列出 / 创建上传密钥 |
-| DELETE | `/keys/:id` | 吊销密钥 |
-| GET | `/abuse` | 封禁来源：每行带 `active` 标记（是否仍在封禁中）与累计猜错次数 |
-| DELETE | `/abuse/:source` | 解封（source 需 URL 编码，如 `203.0.113.0%2F24`） |
+| GET | `/me` | 身份；含 `temp_link_max_seconds`（14400） |
+| GET | `/stats` | 总量；`live`/`expired` 按「是否还有有效链接」聚合 |
+| GET | `/assets` | 列表：`status=live\|expired\|deleted\|all`、`kind`、`tag`、`project`（slug/id/`none`）、`q` |
+| POST | `/assets/batch` | `{hashes, tags?, tags_mode?, project?, create_links?, expires_in?/never?, label?}` |
+| GET | `/assets/:assetHash` | 详情 + `links[]` + 审计；含 `editable_text` / `markdown` / `project` |
+| GET/POST | `/assets/:assetHash/links` | 列出 / 新建普通分享链接 |
+| POST | `/assets/:assetHash/temp-link` | **临时链**：`{expires_in?}`，默认 1h，**硬上限 4h** |
+| PATCH | `/links/:linkHash` | 改链接过期 / label |
+| DELETE | `/links/:linkHash` | 吊销链接（不删资产） |
+| GET/PUT | `/assets/:assetHash/content` | 文本/Markdown 原文读写（≤2 MiB） |
+| PATCH | `/assets/:assetHash` | `{filename}` / `{note}` / `{tags}` / `{project}`（slug/id/`none`） |
+| DELETE | `/assets/:assetHash` | 软删（吊销全部链接）；`?purge=1` 彻底删除 |
+| POST | `/assets/:assetHash/restore` | 恢复资产（需重新建链才能外发） |
+| GET | `/tags` | 有效资产上的标签计数 |
+| GET/POST | `/projects` | 项目列表 / 创建 `{slug, name?, note?}` |
+| GET/PATCH/DELETE | `/projects/:idOrSlug` | 详情 / 改名改 slug / 删除（资产改未归类） |
+| GET/POST | `/keys` · `DELETE /keys/:id` | 上传密钥 |
+| GET | `/abuse` · `DELETE /abuse/:source` | 封禁来源 |
 | GET | `/audit` | 操作记录 |
-| GET/PATCH | `/settings` | 运行时策略（`default_ttl_days`、`max_upload_bytes`、`trash_retention_days`） |
+| GET/PATCH | `/settings` | `default_ttl_days`（新建链接默认）、`max_upload_bytes`、`trash_retention_days` |
 
 ```bash
-curl -sS https://assets.talkincode.net/admin/api/stats \
+# Agent：为已有资产开一条 ≤4h 的临时链
+curl -sS -X POST "https://assets.talkincode.net/admin/api/assets/$ASSET_HASH/temp-link" \
   -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
-  -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET"
+  -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"expires_in":"1h","label":"agent"}'
 ```
 
 ## 定时任务
 
-每小时（`17 * * * *`）执行一次清理：
-
-1. 过期资产：写入删除标记并立即删除 R2 字节；
-2. 回收站资产：超过 `trash_retention_days` 后删除字节、记录 `purged_at`；
-3. 清理 7 天前的封禁记录、180 天前的审计记录。
+每小时：清理回收站过期字节、过期封禁记录、旧审计。**不会**因链接过期删除 R2。

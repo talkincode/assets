@@ -1,16 +1,15 @@
 # talkincode-assets
 
-基于 Cloudflare 的私有资产服务：上传图片 / 音频 / 视频 / 任意文件，拿到一个 hash 外链，
-在私有 dashboard 里预览、改期、换 hash、删除。
+基于 Cloudflare 的私有资产服务：上传图片 / 音频 / 视频 / 任意文件，拿到可过期的分享外链；
+资产本身不过期、hash 不可变，可按渠道建多条链接；dashboard 支持预览、标签、Markdown 在线编辑。
 
-- **外链**：`https://assets.talkincode.net/<hash>/<filename>` —— 定位只靠 `hash`，
-  `filename` 只是下载名，可以随便改。
-- **过期**：默认 7 天，可按上传指定（`1h` / `7d` / `never`…），到期后链接立即失效并释放存储。
-- **dashboard**：`https://assets.talkincode.net/admin/`，走 Cloudflare Access（SSO），
-  当前只允许 `jamiesun.net@gmail.com`。
-- **上传密钥**：dashboard 里配置，可多个、可吊销，只在创建时显示一次。
-- **CLI**：`cli/assets.mjs`，零依赖，纯环境变量配置，方便 agent 调用。
-- **暴力破解防护**：连续猜 hash / 猜密钥的来源会被自动封禁（5 分钟起，逐次加倍到 7 天）。封禁期间公开下载也返回 403。
+- **资产**：不可变 `asset_hash`，字节一直保留，仅人工删除。
+- **分享链接**：独立 link hash；`https://assets.talkincode.net/<link_hash>/<filename>`。
+  复制/建链时选过期时间；各渠道互不影响。
+- **过期**：只挂在链接上（上传默认首链 7 天）；到期 410，**不删** R2。
+- **dashboard**：`/admin/`，Cloudflare Access；可预览/建链/吊销/Markdown 编辑。
+- **CLI / Agent**：`assets temp <hash|query> --expire 1h -q` 开临时链（**硬上限 4h**）。
+- **上传密钥**与暴力破解防护：同前。
 
 ## 架构
 
@@ -27,8 +26,8 @@ flowchart TD
 | 组件 | 作用 |
 | --- | --- |
 | Worker `talkincode-assets` | 全部路由：公开下载、上传 API、dashboard API、定时清理 |
-| D1 `talkincode-assets` | `assets` / `api_keys` / `audit_log` / `blocked_sources` / `settings` |
-| R2 `talkincode-assets` | 对象存储，key 为 `objects/<随机串>`，与 hash 解耦（换 hash 不用搬字节） |
+| D1 `talkincode-assets` | `assets` / `links` / `api_keys` / `audit_log` / `blocked_sources` / `settings` |
+| R2 `talkincode-assets` | 对象存储，key 为 `objects/<随机串>`，与公开 link hash 解耦 |
 | Durable Object `AbuseGuard` | 每个来源网络（IPv4 /24、IPv6 /64）一份猜错计数与封禁状态 |
 | Cloudflare Access | `/admin` 的 SSO 鉴权；Worker 会再次校验 JWT 签名与 `aud`（fail-closed） |
 
@@ -36,8 +35,8 @@ flowchart TD
 
 | 方法 | 路径 | 鉴权 | 说明 |
 | --- | --- | --- | --- |
-| GET/HEAD | `/<hash>/<filename?>` | 无（hash 即凭证） | 下载/预览，支持 Range、ETag、CORS |
-| POST/PUT | `/api/upload` | 上传密钥 | 返回 `hash` 与外链 |
+| GET/HEAD | `/<hash>/<filename?>` | 无（link hash 即凭证） | 下载/预览；410=链接过期 |
+| POST/PUT | `/api/upload` | 上传密钥 | 建资产 + 首链，返回 link `hash`/`url` + `asset_hash` |
 | GET | `/health` | 无 | 存活探测 |
 | ANY | `/admin/api/*` | Cloudflare Access | dashboard 与管理 API |
 | GET | `/admin/` | Cloudflare Access | dashboard 静态页面 |

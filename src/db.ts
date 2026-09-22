@@ -1,9 +1,24 @@
 /**
- * D1 access layer: one place that knows the asset row shape and the settings
- * lookup, so route handlers never hand-write SQL for common reads.
+ * D1 access layer: one place that knows the asset/link row shapes and the
+ * settings lookup, so route handlers never hand-write SQL for common reads.
  */
 
 import { assetKind, decodeTags, type AssetKind } from './util';
+
+export interface ProjectRow {
+  id: string;
+  slug: string;
+  name: string;
+  note: string | null;
+  created_at: number;
+  archived_at: number | null;
+}
+
+export interface ProjectRef {
+  id: string;
+  slug: string;
+  name: string;
+}
 
 export interface AssetRow {
   hash: string;
@@ -14,14 +29,24 @@ export interface AssetRow {
   etag: string | null;
   note: string | null;
   tags: string | null;
+  project_id: string | null;
   key_id: string | null;
   uploader_ip: string | null;
   uploader_agent: string | null;
   created_at: number;
-  expires_at: number | null;
   deleted_at: number | null;
   delete_reason: string | null;
   purged_at: number | null;
+}
+
+export interface LinkRow {
+  hash: string;
+  asset_hash: string;
+  expires_at: number | null;
+  label: string | null;
+  created_at: number;
+  created_by: string | null;
+  revoked_at: number | null;
   downloads: number;
   last_access_at: number | null;
 }
@@ -63,19 +88,57 @@ export async function getAsset(env: Env, hash: string): Promise<AssetRow | null>
   return first<AssetRow>(env, 'SELECT * FROM assets WHERE hash = ?', hash);
 }
 
+export async function getLink(env: Env, hash: string): Promise<LinkRow | null> {
+  return first<LinkRow>(env, 'SELECT * FROM links WHERE hash = ?', hash);
+}
+
+export async function getProject(env: Env, id: string): Promise<ProjectRow | null> {
+  return first<ProjectRow>(env, 'SELECT * FROM projects WHERE id = ?', id);
+}
+
+export async function getProjectBySlug(env: Env, slug: string): Promise<ProjectRow | null> {
+  return first<ProjectRow>(env, 'SELECT * FROM projects WHERE slug = ?', slug);
+}
+
+export function projectRef(row: ProjectRow | null | undefined): ProjectRef | null {
+  if (!row) return null;
+  return { id: row.id, slug: row.slug, name: row.name };
+}
+
+/** Load project refs for a set of ids (skips missing / empty). */
+export async function projectsByIds(env: Env, ids: string[]): Promise<Map<string, ProjectRow>> {
+  const unique = [...new Set(ids.filter(Boolean))];
+  const map = new Map<string, ProjectRow>();
+  if (unique.length === 0) return map;
+  const placeholders = unique.map(() => '?').join(',');
+  const rows = await all<ProjectRow>(
+    env,
+    `SELECT * FROM projects WHERE id IN (${placeholders})`,
+    ...unique,
+  );
+  for (const row of rows) map.set(row.id, row);
+  return map;
+}
+
 export interface AssetView extends Omit<AssetRow, 'tags'> {
   tags: string[];
   kind: AssetKind;
   status: 'live' | 'expired' | 'deleted' | 'purged';
-  url_path: string;
+  live_links: number;
+  downloads: number;
 }
 
-export function describeAsset(asset: AssetRow, now: number): AssetView {
+export function describeAsset(
+  asset: AssetRow,
+  now: number,
+  extras: { live_links?: number; downloads?: number } = {},
+): AssetView {
+  const liveLinks = extras.live_links ?? 0;
   const status = asset.purged_at
     ? 'purged'
     : asset.deleted_at
       ? 'deleted'
-      : asset.expires_at !== null && asset.expires_at <= now
+      : liveLinks === 0
         ? 'expired'
         : 'live';
   return {
@@ -83,7 +146,8 @@ export function describeAsset(asset: AssetRow, now: number): AssetView {
     tags: decodeTags(asset.tags),
     kind: assetKind(asset.content_type),
     status,
-    url_path: `/${asset.hash}/${encodeURIComponent(asset.filename)}`,
+    live_links: liveLinks,
+    downloads: extras.downloads ?? 0,
   };
 }
 

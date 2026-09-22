@@ -34,7 +34,7 @@ export default {
 
   async scheduled(_event: ScheduledController, env: Env, exec: ExecutionContext): Promise<void> {
     const result = await sweep(env, exec);
-    if (result.expired > 0 || result.purged > 0) {
+    if (result.purged > 0 || result.blocksCleared > 0 || result.auditPruned > 0) {
       console.log('assets sweep', JSON.stringify(result));
     }
   },
