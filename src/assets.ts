@@ -11,30 +11,41 @@ import {
   errorResponse,
   guessContentType,
   hashProblem,
+  isActiveContent,
   isPreviewable,
   RESERVED_SEGMENTS,
   sanitizeFilename,
 } from './util';
 import { describeAsset, getAsset, run, type AssetRow } from './db';
 import type { Ctx } from './router';
-import { registerMiss, withinRequestBudget } from './abuse';
+import { canonicalAssetUrl } from './cache';
+import { isBlocked, registerMiss, withinRequestBudget } from './abuse';
 
 const RANGE_PATTERN = /^bytes=(\d*)-(\d*)$/;
+
+/** Stop a stored file from being sniffed or executed as a same-origin document. */
+function applyDocumentGuards(headers: Headers): void {
+  headers.set('x-content-type-options', 'nosniff');
+  headers.set('content-security-policy', 'sandbox');
+}
 
 function notFound(headers: HeadersInit = {}): Response {
   const merged = new Headers(headers);
   merged.set('cache-control', 'no-store');
+  applyDocumentGuards(merged);
   return new Response('not found\n', { status: 404, headers: merged });
 }
 
 function blockedResponse(retryAfter: number): Response {
+  const headers = new Headers({
+    'content-type': 'text/plain; charset=utf-8',
+    'cache-control': 'no-store',
+    'retry-after': String(retryAfter),
+  });
+  applyDocumentGuards(headers);
   return new Response('too many failed lookups from this network\n', {
     status: 403,
-    headers: {
-      'content-type': 'text/plain; charset=utf-8',
-      'cache-control': 'no-store',
-      'retry-after': String(retryAfter),
-    },
+    headers,
   });
 }
 
@@ -71,6 +82,8 @@ function etagFor(asset: AssetRow): string {
 }
 
 function downloadMode(url: URL, contentType: string): 'inline' | 'attachment' {
+  // `?inline=1` must not turn HTML/SVG/XML/JS back into a same-origin document.
+  if (isActiveContent(contentType)) return 'attachment';
   if (url.searchParams.get('dl') === '1' || url.searchParams.has('download')) return 'attachment';
   if (url.searchParams.get('inline') === '1') return 'inline';
   return isPreviewable(contentType) ? 'inline' : 'attachment';
@@ -92,6 +105,11 @@ export async function handleAssetRequest(ctx: Ctx): Promise<Response> {
   if (request.method !== 'GET' && request.method !== 'HEAD') {
     return errorResponse(405, 'method_not_allowed', 'assets are read-only on this path');
   }
+
+  // A banned network is refused before any hash lookup, including hits.
+  // Otherwise 200 vs 403 still tells a scanner which hashes exist.
+  const blocked = await isBlocked(env, request);
+  if (blocked.blocked) return blockedResponse(blocked.retryAfter);
 
   if (!(await withinRequestBudget(env, request))) {
     return blockedResponse(60);
@@ -122,10 +140,12 @@ export async function handleAssetRequest(ctx: Ctx): Promise<Response> {
   // afterwards, so the status a client sees does not depend on when
   // housekeeping happened to run.
   if (asset.expires_at !== null && asset.expires_at <= now) {
-    return new Response('this asset has expired\n', {
-      status: 410,
-      headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' },
+    const headers = new Headers({
+      'content-type': 'text/plain; charset=utf-8',
+      'cache-control': 'no-store',
     });
+    applyDocumentGuards(headers);
+    return new Response('this asset has expired\n', { status: 410, headers });
   }
   if (asset.purged_at !== null) return notFound();
   if (asset.deleted_at !== null) return notFound();
@@ -135,6 +155,7 @@ export async function handleAssetRequest(ctx: Ctx): Promise<Response> {
   const contentType = guessContentType(filename, asset.content_type);
   const mode = downloadMode(url, contentType);
   const headers = corsHeaders(env);
+  applyDocumentGuards(headers);
   headers.set('content-type', contentType);
   headers.set('content-disposition', contentDisposition(filename, mode));
   headers.set('etag', etagFor(asset));
@@ -154,13 +175,12 @@ export async function handleAssetRequest(ctx: Ctx): Promise<Response> {
   }
 
   if (!range) {
-    const cached = await caches.default.match(new Request(request.url, { method: 'GET' }));
+    const cached = await caches.default.match(cacheRequest(env, asset.hash));
     if (cached) {
-      const response = new Response(cached.body, cached);
-      // A cached copy is still a download; keep the counter warm without a
-      // blocking write on the hot path.
-      ctx.exec.waitUntil(countDownload(env, asset));
-      return response;
+      headers.set('content-length', String(asset.size));
+      // Headers are rebuilt for this request. Only the bytes are cached, so a
+      // junk query or a different filename cannot mint a new cache entry.
+      return new Response(cached.body, { status: 200, headers });
     }
   }
 
@@ -179,9 +199,13 @@ export async function handleAssetRequest(ctx: Ctx): Promise<Response> {
   const response = new Response(body, { status: range ? 206 : 200, headers });
   if (!range) {
     ctx.exec.waitUntil(countDownload(env, asset));
-    ctx.exec.waitUntil(caches.default.put(new Request(request.url, { method: 'GET' }), response.clone()));
+    ctx.exec.waitUntil(caches.default.put(cacheRequest(env, asset.hash), response.clone()));
   }
   return response;
+}
+
+function cacheRequest(env: Env, hash: string): Request {
+  return new Request(canonicalAssetUrl(env.PUBLIC_BASE_URL, hash), { method: 'GET' });
 }
 
 function countDownload(env: Env, asset: AssetRow): Promise<unknown> {

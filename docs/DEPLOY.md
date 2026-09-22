@@ -69,6 +69,17 @@ npx wrangler deploy
 4. 把 `ACCESS_TEAM_DOMAIN` / `ACCESS_AUD` 写回 `wrangler.toml`；
 5. 可选：创建 Access Service Token，打印 `client_id` / `client_secret`（只显示一次）供 CLI 使用。
 
+### 脚本踩过的三个坑（手工配置时同样要注意）
+
+1. **`zone_name` 必填**：不带 `zone_name` 建应用会报 `12130 domain does not belong to zone`。
+2. **path 要写进 domain**：`path` 字段会被这个 API 版本丢弃，导致应用盖住整个域名，
+   连公开下载都会被 302 到登录页。必须让 destination 变成 `assets.talkincode.net/admin`。
+3. **service token 的策略 decision 是 `non_identity`**，不是 `allow`：service token 不携带
+   用户身份，`allow` 策略永远匹配不上，结果是每个请求都 302 回登录页。
+
+另外：本账号的 Zero Trust 组织域是 `toughstruct.cloudflareaccess.com`（历史命名），
+登录页会显示这个域名，属于正常现象。
+
 ### 方式 B：控制台手工配置
 
 Zero Trust → Access → Applications → Add an application → Self-hosted：
@@ -76,8 +87,9 @@ Zero Trust → Access → Applications → Add an application → Self-hosted：
 | 字段 | 值 |
 | --- | --- |
 | Application name | `Talkincode Assets` |
-| Public hostname / path | `assets.talkincode.net` / `admin` |
+| Public hostname / path | `assets.talkincode.net/admin`（**path 必须拼在域名字段里**） |
 | Session duration | 24h |
+| Cookie | `HttpOnly` 打开，`SameSite` = `Lax` |
 | Policy name | `allow-owner`，Action = Allow |
 | Policy rule | Include → Emails → `jamiesun.net@gmail.com` |
 
@@ -119,6 +131,20 @@ export CF_ACCESS_CLIENT_SECRET=...
 
 `CF_ZONE_ID` 已在 `wrangler.toml` 中配置。
 
+## 6.5 CI 部署用的 token（已配好）
+
+`talkincode-assets-deploy` 是用账号里那把 key 新建的**账号级** token，只授了
+Workers Scripts / Routes、Workers Tail、D1、R2、Account Settings 读写和 zone Workers
+Routes 读写，不含 Access、不含 DNS。已写入 GitHub Secrets（`CLOUDFLARE_API_TOKEN`、
+`CLOUDFLARE_ACCOUNT_ID`），`deploy.yml` 推 main 或手动触发即可。
+
+两个只有踩过才知道的点：
+
+- **zone 权限组必须挂在 account 资源下**：`POST /accounts/{id}/tokens` 不认
+  `com.cloudflare.api.zone.*` 这种资源类型，zone 级的 Workers Routes 组要放在
+  `com.cloudflare.api.account.{id}` 的策略里。
+- 因此该 token 的策略是**一条** account 资源策略，里面同时含账号级和 zone 级权限组。
+
 ## 7. 环境变量速查
 
 | 变量 | 默认 | 说明 |
@@ -158,8 +184,10 @@ npx wrangler tail                                   # 实时日志
 npx wrangler d1 execute talkincode-assets --remote -y --command "SELECT hash, size, expires_at FROM assets ORDER BY created_at DESC LIMIT 10"
 ```
 
+- `/admin` 302 到 `…cloudflareaccess.com/cdn-cgi/access/login/…`：正常，说明 Access 在拦。
 - `/admin` 503 `access_not_configured`：`ACCESS_AUD` / `ACCESS_TEAM_DOMAIN` 没写进
-  `wrangler.toml`，或改完没重新部署。
-- `/admin` 401 `access_required`：请求没经过 Access（直连了 workers.dev 域名？）。
+  `wrangler.toml`，或改完没重新部署（**换过 Access 应用必须重新 deploy**，AUD 会变）。
+- `/admin` 401 `access_required`：请求过了边缘但没带 JWT——多半是绕过了 Access。
+- service token 请求也 302：多半是策略 decision 写成了 `allow`，应为 `non_identity`。
 - 上传 413：超过 `max_upload_bytes`。
-- 上传 411：用了 chunked 编码且超过 25 MB，请带上 `Content-Length`。
+- 上传 411：请求没有 `Content-Length`（chunked）。补上长度再传。

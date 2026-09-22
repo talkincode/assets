@@ -26,6 +26,8 @@ npm run deploy     # wrangler deploy (assets.talkincode.net)
 ## Useful facts
 
 - Uploads need `ASSETS_KEY`; admin commands need `CF_ACCESS_CLIENT_ID`/`SECRET`.
+  A ready-made env file lives at `~/.config/talkincode-assets/env` — run admin commands as
+  `./cli/assets.mjs --env-file ~/.config/talkincode-assets/env <cmd>`.
 - `./cli/assets.mjs put <file> --json` is the machine-readable path.
 - Asset URLs are `PUBLIC_BASE_URL + "/" + hash + "/" + filename`; only the hash locates bytes.
 - Tests override `ACCESS_TEAM_DOMAIN` / `ABUSE_MISS_THRESHOLD` in `vitest.config.ts`; the

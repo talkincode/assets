@@ -23,8 +23,8 @@ const name = (() => {
 const local = args.includes('--local');
 const database = 'talkincode-assets';
 
-if (!name || name.trim() === '') {
-  process.stderr.write('error: --name is required\n');
+if (typeof name !== 'string' || !/^[A-Za-z0-9._ -]{1,64}$/.test(name)) {
+  process.stderr.write('error: --name must be 1-64 characters of [A-Za-z0-9._ -]\n');
   process.exit(1);
 }
 
@@ -32,10 +32,8 @@ const secret = `ak_${randomBytes(24).toString('hex')}`;
 const keyHash = createHash('sha256').update(secret).digest('hex');
 const id = randomUUID();
 const now = Date.now();
-const safeName = name.replace(/'/g, '');
-
 const sql = `INSERT INTO api_keys (id, name, key_hash, prefix, created_at, created_by, use_count)
-VALUES ('${id}', '${safeName}', '${keyHash}', '${secret.slice(0, 10)}', ${now}, 'bootstrap', 0);`;
+VALUES ('${id}', '${name}', '${keyHash}', '${secret.slice(0, 10)}', ${now}, 'bootstrap', 0);`;
 
 const result = spawnSync(
   'npx',

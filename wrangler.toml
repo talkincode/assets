@@ -32,8 +32,8 @@ ABUSE_STRIKE_DECAY_HOURS = "24"
 # --- Cloudflare Access (dashboard auth) -------------------------------------
 # Both values come from the Access application; see docs/DEPLOY.md. The worker
 # fails closed (503) on /admin while they are empty.
-ACCESS_TEAM_DOMAIN = ""
-ACCESS_AUD = ""
+ACCESS_TEAM_DOMAIN = "toughstruct.cloudflareaccess.com"
+ACCESS_AUD = "1520106885e49165b690854b70e41af3b2237a8c4ac80d308345150be1f02ed9"
 # Comma separated. The dashboard only accepts identities in this list.
 ACCESS_ALLOWED_EMAILS = "jamiesun.net@gmail.com"
 # Access service tokens (for the CLI) are trusted once Access has vetted them.

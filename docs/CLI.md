@@ -15,8 +15,13 @@
 | `CF_ACCESS_CLIENT_ID` | 管理命令需要 | Access Service Token client id |
 | `CF_ACCESS_CLIENT_SECRET` | 管理命令需要 | Access Service Token secret |
 
-CLI 会自动读取工作目录下的 `.env`（已存在的环境变量优先）。
-也可以用 `--base-url`、`--env-file` 覆盖。
+CLI 会自动读取工作目录下的 `.env`（已存在的环境变量优先），
+也可以用 `--base-url`、`--env-file` 覆盖。部署时 `access:setup --service-token` 会把
+Access service token 写到 `~/.config/talkincode-assets/env`（600），所以管理命令通常这样跑：
+
+```bash
+./cli/assets.mjs --env-file ~/.config/talkincode-assets/env ls
+```
 
 ## 输出约定
 

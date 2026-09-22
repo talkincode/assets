@@ -82,9 +82,125 @@ describe('upload and delivery', () => {
     const served = await SELF.fetch(`${BASE}/${hash}/anything-i-like.txt`);
     expect(served.status).toBe(200);
     expect(await served.text()).toBe('hello assets');
+    expect(served.headers.get('content-disposition')).toContain('inline');
     expect(served.headers.get('content-disposition')).toContain('anything-i-like.txt');
+    expect(served.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(served.headers.get('content-security-policy')).toBe('sandbox');
     expect(served.headers.get('cache-control')).toContain('max-age=');
     expect(served.headers.get('etag')).toBeTruthy();
+
+    const decorated = await SELF.fetch(`${BASE}/${hash}/other-name.txt?utm=campaign&inline=1`);
+    expect(decorated.status).toBe(200);
+    expect(decorated.headers.get('content-disposition')).toContain('other-name.txt');
+    expect(await decorated.text()).toBe('hello assets');
+  });
+
+  it('downloads HTML and SVG instead of rendering them, even with ?inline=1', async () => {
+    const htmlBody = '<script>fetch("/admin/api/me")</script>';
+    const html = await SELF.fetch(`${BASE}/api/upload`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${key}`,
+        'x-filename': 'evil.html',
+        'content-type': 'text/html; charset=utf-8',
+        'content-length': String(new TextEncoder().encode(htmlBody).length),
+        'cf-connecting-ip': DEFAULT_IP,
+      },
+      body: htmlBody,
+    });
+    expect(html.status).toBe(201);
+    const { hash } = (await html.json()) as { hash: string };
+    const served = await SELF.fetch(`${BASE}/${hash}/evil.html?inline=1`);
+    expect(served.status).toBe(200);
+    expect(served.headers.get('content-disposition')).toMatch(/^attachment;/);
+    expect(served.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(served.headers.get('content-security-policy')).toBe('sandbox');
+
+    const svgBody = '<svg xmlns="http://www.w3.org/2000/svg"><script>1</script></svg>';
+    const svg = await SELF.fetch(`${BASE}/api/upload`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${key}`,
+        'x-filename': 'evil.svg',
+        'content-type': 'image/svg+xml',
+        'content-length': String(new TextEncoder().encode(svgBody).length),
+        'cf-connecting-ip': DEFAULT_IP,
+      },
+      body: svgBody,
+    });
+    const svgHash = ((await svg.json()) as { hash: string }).hash;
+    const svgServed = await SELF.fetch(`${BASE}/${svgHash}/evil.svg?inline=1`);
+    expect(svgServed.headers.get('content-disposition')).toMatch(/^attachment;/);
+  });
+
+  it('rejects a key in the query string and a body without Content-Length', async () => {
+    const viaQuery = await SELF.fetch(`${BASE}/api/upload?key=${encodeURIComponent(key)}`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'text/plain',
+        'content-length': '1',
+        'cf-connecting-ip': DEFAULT_IP,
+      },
+      body: 'x',
+    });
+    expect(viaQuery.status).toBe(401);
+
+    const viaHeader = await SELF.fetch(`${BASE}/api/upload`, {
+      method: 'POST',
+      headers: {
+        'x-assets-key': key,
+        'content-type': 'text/plain',
+        'content-length': '1',
+        'x-filename': 'a.txt',
+        'cf-connecting-ip': DEFAULT_IP,
+      },
+      body: 'x',
+    });
+    expect(viaHeader.status).toBe(201);
+
+    const chunked = await SELF.fetch(`${BASE}/api/upload`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${key}`,
+        'content-type': 'text/plain',
+        'cf-connecting-ip': DEFAULT_IP,
+      },
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('hi'));
+          controller.close();
+        },
+      }),
+    });
+    expect(chunked.status).toBe(411);
+
+    const badName = await SELF.fetch(`${BASE}/api/upload`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${key}`,
+        'content-type': 'text/plain',
+        'content-length': '1',
+        'content-disposition': "attachment; filename*=UTF-8''%E0%A4%A",
+        'cf-connecting-ip': DEFAULT_IP,
+      },
+      body: 'x',
+    });
+    expect(badName.status).toBe(400);
+    expect(((await badName.json()) as { error: string }).error).toBe('invalid_filename');
+  });
+
+  it('maps a concurrent custom-hash clash to 409', async () => {
+    const query = 'hash=RaceHashValue123456';
+    const [first, second] = await Promise.all([
+      upload('one', { key, query }),
+      upload('two', { key, query }),
+    ]);
+    expect([first.status, second.status].sort()).toEqual([201, 409]);
+    const row = await env.DB.prepare('SELECT object_key FROM assets WHERE hash = ?')
+      .bind('RaceHashValue123456')
+      .first<{ object_key: string }>();
+    expect(row?.object_key).toBeTruthy();
+    expect(await env.BUCKET.head(row!.object_key)).not.toBeNull();
   });
 
   it('answers range requests and HEAD without touching the body', async () => {
@@ -139,11 +255,12 @@ describe('upload and delivery', () => {
     ).run();
     resetSettingsCache();
 
+    const before = await env.DB.prepare('SELECT COUNT(*) AS n FROM assets').first<{ n: number }>();
     const rejected = await upload('this body is definitely longer than sixteen bytes', { key });
     expect(rejected.status).toBe(413);
 
-    const stored = await env.DB.prepare('SELECT COUNT(*) AS n FROM assets WHERE size > 16').first<{ n: number }>();
-    expect(stored?.n).toBe(0);
+    const after = await env.DB.prepare('SELECT COUNT(*) AS n FROM assets').first<{ n: number }>();
+    expect(after?.n).toBe(before?.n);
   });
 });
 
@@ -174,6 +291,27 @@ describe('admin API and Cloudflare Access', () => {
       headers: { 'cf-access-jwt-assertion': wrongEmail },
     });
     expect(forbidden.status).toBe(403);
+  });
+
+  it('rejects a malformed assertion, a missing exp, and the wrong issuer', async () => {
+    const malformed = await SELF.fetch(`${BASE}/admin/api/me`, {
+      headers: { 'cf-access-jwt-assertion': 'not-a-jwt' },
+    });
+    expect(malformed.status).toBe(401);
+
+    resetAccessCaches();
+    const noExp = await signAccessJwt({ email: TEST_EMAIL, omitExp: true });
+    const missingExp = await SELF.fetch(`${BASE}/admin/api/me`, {
+      headers: { 'cf-access-jwt-assertion': noExp },
+    });
+    expect(missingExp.status).toBe(401);
+
+    resetAccessCaches();
+    const foreign = await signAccessJwt({ email: TEST_EMAIL, iss: 'https://evil.example' });
+    const wrongIssuer = await SELF.fetch(`${BASE}/admin/api/me`, {
+      headers: { 'cf-access-jwt-assertion': foreign },
+    });
+    expect(wrongIssuer.status).toBe(401);
   });
 
   it('rejects a tampered assertion', async () => {
@@ -274,6 +412,17 @@ describe('admin API and Cloudflare Access', () => {
     });
     expect(rejected.status).toBe(400);
 
+    const crossSite = await SELF.fetch(`${BASE}/admin/api/settings`, {
+      method: 'PATCH',
+      headers: {
+        ...auth,
+        origin: 'https://evil.example',
+        'sec-fetch-site': 'cross-site',
+      },
+      body: JSON.stringify({ default_ttl_days: 1 }),
+    });
+    expect(crossSite.status).toBe(403);
+
     const upload2 = await upload('uses the new default', { key });
     const body = (await upload2.json()) as { expires_at: number };
     expect(body.expires_at - Date.now()).toBeLessThan(4 * 86400000);
@@ -302,6 +451,9 @@ describe('abuse protection', () => {
     const created = await upload('still fine', { key });
     const { hash } = (await created.json()) as { hash: string };
     expect((await SELF.fetch(`${BASE}/${hash}/ok.txt`)).status).toBe(200);
+    const denied = await SELF.fetch(`${BASE}/${hash}/ok.txt`, { headers: ip });
+    expect(denied.status).toBe(403);
+    expect(denied.headers.get('retry-after')).toBeTruthy();
 
     // The dashboard shows the block as active, with the lifetime miss count.
     const token = await signAccessJwt({ email: TEST_EMAIL });
@@ -339,6 +491,15 @@ describe('routing surface', () => {
     expect((await SELF.fetch(`${BASE}/`)).status).toBe(404);
     expect((await SELF.fetch(`${BASE}/a/b/c`)).status).toBe(404);
     expect((await SELF.fetch(`${BASE}/api/unknown`)).status).toBe(404);
+  });
+
+  it('rejects a malformed admin path instead of returning 500', async () => {
+    const token = await signAccessJwt({ email: TEST_EMAIL });
+    const response = await SELF.fetch(`${BASE}/admin/api/assets/%ZZ`, {
+      headers: { 'cf-access-jwt-assertion': token },
+    });
+    expect(response.status).toBe(400);
+    expect(((await response.json()) as { error: string }).error).toBe('invalid_request');
   });
 
   it('answers CORS preflights for embedding', async () => {

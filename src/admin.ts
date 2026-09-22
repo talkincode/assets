@@ -471,9 +471,33 @@ router.patch('/settings', async (ctx) => {
 
 router.get('/policy', async (ctx) => jsonResponse(await uploadPolicy(ctx.env)));
 
+/**
+ * Browsers send `Sec-Fetch-Site` and `Origin` on non-GET fetches. A cross-site
+ * call is refused even if the Access cookie were attached. Service tokens and
+ * the CLI omit both headers and stay allowed.
+ */
+function assertAdminWriteOrigin(request: Request, url: URL): void {
+  if (request.method === 'GET' || request.method === 'HEAD' || request.method === 'OPTIONS') return;
+  if (request.headers.get('sec-fetch-site') === 'cross-site') {
+    throw new HttpError(403, 'cross_site', 'cross-site admin requests are refused');
+  }
+  const origin = request.headers.get('origin');
+  if (!origin) return;
+  let originUrl: URL;
+  try {
+    originUrl = new URL(origin);
+  } catch {
+    throw new HttpError(403, 'cross_site', 'invalid Origin');
+  }
+  if (originUrl.host !== url.host) {
+    throw new HttpError(403, 'cross_site', 'Origin does not match this service');
+  }
+}
+
 export async function handleAdminRequest(ctx: Ctx): Promise<Response> {
   try {
     const identity = await requireAccessIdentity(ctx.env, ctx.request);
+    assertAdminWriteOrigin(ctx.request, ctx.url);
     const response = await router.handle({ ...ctx, identity }, '/admin/api');
     if (response) return response;
     return errorResponse(404, 'not_found', 'unknown admin endpoint');

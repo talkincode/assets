@@ -10,7 +10,7 @@
   当前只允许 `jamiesun.net@gmail.com`。
 - **上传密钥**：dashboard 里配置，可多个、可吊销，只在创建时显示一次。
 - **CLI**：`cli/assets.mjs`，零依赖，纯环境变量配置，方便 agent 调用。
-- **暴力破解防护**：连续猜 hash / 猜密钥的来源会被自动封禁（5 分钟起，逐次加倍到 7 天）。
+- **暴力破解防护**：连续猜 hash / 猜密钥的来源会被自动封禁（5 分钟起，逐次加倍到 7 天）。封禁期间公开下载也返回 403。
 
 ## 架构
 
@@ -60,7 +60,7 @@ npx wrangler deploy
 # 3) 先造一把上传密钥（Access 还没配好时也能用）
 node scripts/bootstrap-key.mjs --name laptop
 
-# 4) 配好 dashboard 的 SSO
+# 4) 配好 dashboard 的 SSO（建应用 + 邮箱白名单 + CLI 用的 service token）
 CLOUDFLARE_API_TOKEN=... ./scripts/setup-access.sh --service-token cli
 npx wrangler deploy
 ```

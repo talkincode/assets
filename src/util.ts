@@ -229,6 +229,24 @@ export function isPreviewable(contentType: string): boolean {
   return assetKind(contentType) !== 'other' && assetKind(contentType) !== 'archive';
 }
 
+const ACTIVE_CONTENT_TYPES = new Set([
+  'text/html',
+  'application/xhtml+xml',
+  'image/svg+xml',
+  'text/xml',
+  'application/xml',
+]);
+
+/**
+ * Types that a browser will execute when navigated to on this origin.
+ * They must be downloaded, never rendered inline: an HTML page here can call
+ * `/admin/api` with the Access cookie.
+ */
+export function isActiveContent(contentType: string): boolean {
+  const type = contentType.split(';')[0].trim().toLowerCase();
+  return ACTIVE_CONTENT_TYPES.has(type) || type.includes('javascript');
+}
+
 export async function sha256Hex(input: string): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input));
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');

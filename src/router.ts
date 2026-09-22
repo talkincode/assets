@@ -5,6 +5,7 @@
  */
 
 import type { Identity } from './auth';
+import { errorResponse } from './util';
 
 export interface Ctx {
   request: Request;
@@ -69,7 +70,11 @@ export class Router {
       for (let i = 0; i < route.segments.length; i += 1) {
         const pattern = route.segments[i];
         if (pattern.startsWith(':')) {
-          params[pattern.slice(1)] = decodeURIComponent(rest[i]);
+          try {
+            params[pattern.slice(1)] = decodeURIComponent(rest[i]);
+          } catch {
+            return errorResponse(400, 'invalid_request', 'malformed path encoding');
+          }
         } else if (pattern !== rest[i]) {
           matched = false;
           break;

@@ -62,7 +62,7 @@ async function route(ctx: Ctx): Promise<Response> {
     if (blocked.blocked) {
       return errorResponse(403, 'blocked', 'this network has been blocked after repeated failed attempts');
     }
-    const identity = await authenticateUploadKey(env, request, url);
+    const identity = await authenticateUploadKey(env, request);
     if (!identity) {
       // A wrong key is the same kind of abuse as guessing hashes.
       const verdict = await registerMiss(env, request, 'bad upload key');

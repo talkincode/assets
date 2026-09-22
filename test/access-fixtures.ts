@@ -26,7 +26,15 @@ function base64Url(input: Uint8Array | string): string {
 
 /** Mints an assertion shaped like the ones Access injects as a request header. */
 export async function signAccessJwt(
-  options: { email?: string; aud?: string[]; expSeconds?: number; kid?: string; commonName?: string } = {},
+  options: {
+    email?: string;
+    aud?: string[];
+    expSeconds?: number;
+    kid?: string;
+    commonName?: string;
+    iss?: string;
+    omitExp?: boolean;
+  } = {},
   now = Date.now(),
 ): Promise<string> {
   const key = await crypto.subtle.importKey(
@@ -37,18 +45,17 @@ export async function signAccessJwt(
     ['sign'],
   );
   const header = base64Url(JSON.stringify({ alg: 'RS256', kid: options.kid ?? TEST_KID, typ: 'JWT' }));
-  const payload = base64Url(
-    JSON.stringify({
-      aud: options.aud ?? [TEST_AUDIENCE],
-      iss: `https://${TEST_TEAM_DOMAIN}`,
-      iat: Math.floor(now / 1000) - 5,
-      exp: Math.floor(now / 1000) + (options.expSeconds ?? 600),
-      email: options.email,
-      common_name: options.commonName,
-      sub: 'test-subject',
-      type: 'app',
-    }),
-  );
+  const claims: Record<string, unknown> = {
+    aud: options.aud ?? [TEST_AUDIENCE],
+    iss: options.iss ?? `https://${TEST_TEAM_DOMAIN}`,
+    iat: Math.floor(now / 1000) - 5,
+    email: options.email,
+    common_name: options.commonName,
+    sub: 'test-subject',
+    type: 'app',
+  };
+  if (!options.omitExp) claims.exp = Math.floor(now / 1000) + (options.expSeconds ?? 600);
+  const payload = base64Url(JSON.stringify(claims));
   const signature = await crypto.subtle.sign(
     'RSASSA-PKCS1-v1_5',
     key,

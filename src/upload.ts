@@ -33,9 +33,15 @@ function filenameFromRequest(request: Request, url: URL): string {
   const disposition = request.headers.get('content-disposition');
   if (disposition) {
     const extended = /filename\*=UTF-8''([^;]+)/i.exec(disposition);
+    if (extended) {
+      try {
+        return sanitizeFilename(decodeURIComponent(extended[1]));
+      } catch {
+        throw new HttpError(400, 'invalid_filename', 'Content-Disposition filename is not valid percent-encoding');
+      }
+    }
     const plain = /filename="?([^";]+)"?/i.exec(disposition);
-    const raw = extended ? decodeURIComponent(extended[1]) : plain ? plain[1] : null;
-    if (raw) return sanitizeFilename(raw);
+    if (plain) return sanitizeFilename(plain[1]);
   }
   return 'download';
 }
@@ -60,63 +66,38 @@ async function resolveExpiry(env: Env, request: Request, url: URL, now: number):
  * R2 will only accept a body whose length it knows up front, so:
  *  - a declared `Content-Length` is verified against the cap and streamed
  *    through a FixedLengthStream (no buffering, no truncation);
- *  - a chunked body has to be buffered, and is refused past a small ceiling so
- *    a worker isolate cannot be pushed into an out-of-memory kill.
+ *  - a body without `Content-Length` is refused (411) instead of buffered.
+ *    Chunked uploads used to pin up to 25 MB per request in the isolate.
  *
  * A `Content-Length` that understates the real body makes the stream error out
  * rather than storing a truncated object.
  */
-const CHUNKED_BUFFER_LIMIT = 25 * 1024 * 1024;
-
 async function r2Body(request: Request, maxBytes: number): Promise<{ body: ReadableStream; expectedSize: number }> {
   const declaredHeader = request.headers.get('content-length');
   const stream = request.body;
   if (!stream) throw new HttpError(400, 'empty_body', 'request has no body');
-
-  if (declaredHeader !== null) {
-    const declared = Number(declaredHeader);
-    if (!Number.isFinite(declared) || declared < 0) {
-      throw new HttpError(400, 'invalid_length', 'Content-Length is not a number');
-    }
-    if (declared > maxBytes) {
-      throw new HttpError(413, 'too_large', `upload exceeds the ${maxBytes} byte limit`);
-    }
-    if (declared === 0) throw new HttpError(400, 'empty_body', 'refusing to store an empty object');
-    const fixed = new FixedLengthStream(declared);
-    // Must not be awaited: the put below is what drives the readable half.
-    stream.pipeTo(fixed.writable).catch(() => undefined);
-    return { body: fixed.readable, expectedSize: declared };
+  if (declaredHeader === null) {
+    throw new HttpError(411, 'length_required', 'Content-Length is required');
   }
 
-  const limit = Math.min(maxBytes, CHUNKED_BUFFER_LIMIT);
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  const reader = stream.getReader();
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (!value) continue;
-    total += value.byteLength;
-    if (total > limit) {
-      await reader.cancel().catch(() => undefined);
-      throw new HttpError(
-        total > maxBytes ? 413 : 411,
-        total > maxBytes ? 'too_large' : 'length_required',
-        total > maxBytes
-          ? `upload exceeds the ${maxBytes} byte limit`
-          : `chunked uploads are limited to ${limit} bytes; send Content-Length for larger files`,
-      );
-    }
-    chunks.push(value);
+  const declared = Number(declaredHeader);
+  if (!Number.isFinite(declared) || declared < 0) {
+    throw new HttpError(400, 'invalid_length', 'Content-Length is not a number');
   }
-  if (total === 0) throw new HttpError(400, 'empty_body', 'refusing to store an empty object');
-  const merged = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    merged.set(chunk, offset);
-    offset += chunk.byteLength;
+  if (declared > maxBytes) {
+    throw new HttpError(413, 'too_large', `upload exceeds the ${maxBytes} byte limit`);
   }
-  return { body: new Response(merged).body!, expectedSize: total };
+  if (declared === 0) throw new HttpError(400, 'empty_body', 'refusing to store an empty object');
+  const fixed = new FixedLengthStream(declared);
+  // Must not be awaited: the put below is what drives the readable half.
+  stream.pipeTo(fixed.writable).catch(() => undefined);
+  return { body: fixed.readable, expectedSize: declared };
+}
+
+function isUniqueViolation(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  const cause = error instanceof Error && error.cause instanceof Error ? error.cause.message : '';
+  return /unique constraint failed/i.test(`${message}\n${cause}`);
 }
 
 export async function handleUpload(ctx: Ctx, actor: UploadActor): Promise<Response> {
@@ -152,11 +133,14 @@ export async function handleUpload(ctx: Ctx, actor: UploadActor): Promise<Respon
   const hash = requestedHash ?? randomHash();
 
   const expiresAt = await resolveExpiry(env, request, url, now);
-  const note = url.searchParams.get('note') ?? request.headers.get('x-note');
+  const noteRaw = url.searchParams.get('note') ?? request.headers.get('x-note');
+  // Same ceiling as the dashboard PATCH, so a header cannot store an unbounded note.
+  const note = noteRaw === null ? null : noteRaw.slice(0, 500);
   const objectKey = `objects/${randomHash(26)}`;
 
   let size = 0;
   let etag: string | null = null;
+  let stored = false;
   try {
     const { body, expectedSize } = await r2Body(request, maxBytes);
     size = expectedSize;
@@ -168,11 +152,15 @@ export async function handleUpload(ctx: Ctx, actor: UploadActor): Promise<Respon
         expiresAt: expiresAt === null ? 'never' : new Date(expiresAt).toISOString(),
       },
     });
+    stored = true;
     etag = object?.etag ?? null;
     if (object?.size !== undefined) size = object.size;
   } catch (error) {
+    if (stored) await env.BUCKET.delete(objectKey).catch(() => undefined);
     if (error instanceof HttpError) return errorResponse(error.status, error.code, error.message);
-    return errorResponse(400, 'upload_failed', error instanceof Error ? error.message : 'upload failed');
+    // The R2/stream message is an internal detail; the client only gets a fixed code.
+    console.error('upload failed', error);
+    return errorResponse(400, 'upload_failed', 'upload failed');
   }
 
   if (size === 0) {
@@ -180,32 +168,47 @@ export async function handleUpload(ctx: Ctx, actor: UploadActor): Promise<Respon
     return errorResponse(400, 'empty_body', 'refusing to store an empty object');
   }
 
-  await run(
-    env,
-    `INSERT INTO assets (hash, object_key, filename, content_type, size, etag, note, key_id,
-                         uploader_ip, uploader_agent, created_at, expires_at, downloads)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
-    hash,
-    objectKey,
-    filename,
-    contentType,
-    size,
-    etag,
-    note,
-    actor.keyId,
-    clientIp(request),
-    request.headers.get('user-agent'),
-    now,
-    expiresAt,
-  );
+  try {
+    await run(
+      env,
+      `INSERT INTO assets (hash, object_key, filename, content_type, size, etag, note, key_id,
+                           uploader_ip, uploader_agent, created_at, expires_at, downloads)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+      hash,
+      objectKey,
+      filename,
+      contentType,
+      size,
+      etag,
+      note,
+      actor.keyId,
+      clientIp(request),
+      request.headers.get('user-agent'),
+      now,
+      expiresAt,
+    );
+  } catch (error) {
+    // The row did not commit, so the object would otherwise be orphaned.
+    await env.BUCKET.delete(objectKey).catch(() => undefined);
+    if (isUniqueViolation(error)) {
+      return errorResponse(409, 'hash_taken', 'that hash is already in use');
+    }
+    throw error;
+  }
 
-  await audit(env, {
-    actor: actor.actor,
-    action: 'upload',
-    target: hash,
-    ip: clientIp(request),
-    detail: `${filename} (${size} bytes)`,
-  });
+  try {
+    await audit(env, {
+      actor: actor.actor,
+      action: 'upload',
+      target: hash,
+      ip: clientIp(request),
+      detail: `${filename} (${size} bytes)`,
+    });
+  } catch (error) {
+    // The asset is already durable. Failing the request here would invite a
+    // retry that creates a second object.
+    console.error('upload audit failed', error);
+  }
 
   return jsonResponse(
     {

@@ -11,6 +11,12 @@
  * Without (2) a stale copy can survive at most CACHE_TTL_SECONDS.
  */
 
+/** The only cache key for an asset. Filename and query are not part of it. */
+export function canonicalAssetUrl(base: string, hash: string): string {
+  return `${base}/${hash}`;
+}
+
+/** Legacy key from before cache keys were collapsed to the hash. */
 export function publicCacheKey(base: string, hash: string, filename: string, download: boolean): string {
   const url = new URL(`${base}/${hash}/${encodeURIComponent(filename)}`);
   if (download) url.searchParams.set('dl', '1');
@@ -46,10 +52,19 @@ async function purgeViaApi(env: Env, urls: string[]): Promise<void> {
   }
 }
 
-/** Every cached variant for one asset. */
+/**
+ * The live cache entry, plus the filename/`dl`/`inline` URLs written before
+ * keys were normalized. Those leftovers expire within CACHE_TTL_SECONDS, but
+ * a delete should still drop them immediately.
+ */
 export function assetCacheUrls(env: Env, hash: string, filename: string): string[] {
+  const legacy = publicCacheKey(env.PUBLIC_BASE_URL, hash, filename, false);
+  const inline = new URL(legacy);
+  inline.searchParams.set('inline', '1');
   return [
-    publicCacheKey(env.PUBLIC_BASE_URL, hash, filename, false),
+    canonicalAssetUrl(env.PUBLIC_BASE_URL, hash),
+    legacy,
     publicCacheKey(env.PUBLIC_BASE_URL, hash, filename, true),
+    inline.toString(),
   ];
 }

@@ -10,6 +10,7 @@ import {
   parseDuration,
   parseTimestamp,
   assetKind,
+  isActiveContent,
 } from '../src/util';
 import { parseRange } from '../src/assets';
 
@@ -91,6 +92,16 @@ describe('filenames', () => {
     expect(guessContentType('blob', 'application/octet-stream')).toBe('application/octet-stream');
     expect(assetKind('video/mp4')).toBe('video');
     expect(assetKind('application/zip')).toBe('archive');
+  });
+
+  it('treats markup and script types as active content, including parameters', () => {
+    expect(isActiveContent('text/html; charset=utf-8')).toBe(true);
+    expect(isActiveContent('image/svg+xml')).toBe(true);
+    expect(isActiveContent('application/xhtml+xml')).toBe(true);
+    expect(isActiveContent('text/javascript')).toBe(true);
+    expect(isActiveContent('application/xml')).toBe(true);
+    expect(isActiveContent('text/plain')).toBe(false);
+    expect(isActiveContent('image/png')).toBe(false);
   });
 });
 

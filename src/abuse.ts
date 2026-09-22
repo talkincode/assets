@@ -6,8 +6,9 @@
  * Layer 2 — the AbuseGuard durable object remembers repeat offenders across
  *           deployments and blocks them for escalating periods.
  *
- * Only failed lookups are recorded. A visitor downloading a real asset never
- * pays for either layer.
+ * Only failed lookups are recorded. A visitor who is not banned and downloads a
+ * real asset never pays for the miss ledger. A banned network is refused on
+ * the read path before the hash is looked up.
  */
 
 import type { GuardResult } from './abuse-guard';

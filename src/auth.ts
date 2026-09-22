@@ -27,25 +27,25 @@ export interface AccessIdentity {
 
 export type Identity = ApiKeyIdentity | AccessIdentity;
 
-export function extractPresentedKey(request: Request, url: URL): string | null {
+export function extractPresentedKey(request: Request): string | null {
   const header = request.headers.get('authorization');
   if (header) {
     const [scheme, ...rest] = header.split(' ');
     if (scheme.toLowerCase() === 'bearer' && rest.length > 0) return rest.join(' ').trim();
   }
-  return request.headers.get('x-assets-key') ?? url.searchParams.get('key');
+  // Query strings land in access logs. The key is header-only.
+  const dedicated = request.headers.get('x-assets-key');
+  if (!dedicated) return null;
+  const trimmed = dedicated.trim();
+  return trimmed === '' ? null : trimmed;
 }
 
 /**
  * Returns the identity, or `null` when the presented key is wrong *and* the
  * caller should be counted as a failed attempt.
  */
-export async function authenticateUploadKey(
-  env: Env,
-  request: Request,
-  url: URL,
-): Promise<ApiKeyIdentity | null> {
-  const presented = extractPresentedKey(request, url);
+export async function authenticateUploadKey(env: Env, request: Request): Promise<ApiKeyIdentity | null> {
+  const presented = extractPresentedKey(request);
   if (!presented) return null;
   const keyHash = await sha256Hex(presented);
   const row = await first<ApiKeyRow>(env, 'SELECT * FROM api_keys WHERE key_hash = ?', keyHash);
@@ -94,15 +94,25 @@ export function resetAccessCaches(): void {
 }
 
 function base64UrlToBytes(value: string): Uint8Array {
-  const padded = value.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(value.length / 4) * 4, '=');
-  const binary = atob(padded);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
-  return bytes;
+  try {
+    const padded = value.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(value.length / 4) * 4, '=');
+    const binary = atob(padded);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  } catch (error) {
+    if (error instanceof HttpError) throw error;
+    throw new HttpError(401, 'invalid_assertion', 'malformed Access assertion');
+  }
 }
 
 function decodeJson<T>(segment: string): T {
-  return JSON.parse(new TextDecoder().decode(base64UrlToBytes(segment))) as T;
+  try {
+    return JSON.parse(new TextDecoder().decode(base64UrlToBytes(segment))) as T;
+  } catch (error) {
+    if (error instanceof HttpError) throw error;
+    throw new HttpError(401, 'invalid_assertion', 'malformed Access assertion');
+  }
 }
 
 async function loadJwks(env: Env, force = false): Promise<Jwk[]> {
@@ -160,12 +170,17 @@ export async function verifyAccessJwt(env: Env, token: string, now = Date.now())
       false,
       ['verify'],
     );
-    return crypto.subtle.verify(
-      'RSASSA-PKCS1-v1_5',
-      key,
-      base64UrlToBytes(signatureSegment),
-      new TextEncoder().encode(`${headerSegment}.${payloadSegment}`),
-    );
+    try {
+      return await crypto.subtle.verify(
+        'RSASSA-PKCS1-v1_5',
+        key,
+        base64UrlToBytes(signatureSegment),
+        new TextEncoder().encode(`${headerSegment}.${payloadSegment}`),
+      );
+    } catch (error) {
+      if (error instanceof HttpError) throw error;
+      return false;
+    }
   };
 
   let keys = await loadJwks(env);
@@ -180,8 +195,15 @@ export async function verifyAccessJwt(env: Env, token: string, now = Date.now())
   if (!audiences.includes(env.ACCESS_AUD)) {
     throw new HttpError(401, 'invalid_assertion', 'Access assertion was issued for another application');
   }
+  const expectedIssuer = `https://${env.ACCESS_TEAM_DOMAIN.trim()}`;
+  if (claims.iss !== expectedIssuer) {
+    throw new HttpError(401, 'invalid_assertion', 'Access assertion was issued by another team');
+  }
   const seconds = now / 1000;
-  if (typeof claims.exp === 'number' && claims.exp + 30 < seconds) {
+  if (typeof claims.exp !== 'number' || !Number.isFinite(claims.exp)) {
+    throw new HttpError(401, 'invalid_assertion', 'Access assertion is missing exp');
+  }
+  if (claims.exp + 30 < seconds) {
     throw new HttpError(401, 'assertion_expired', 'Access session expired, reload the page');
   }
   if (typeof claims.nbf === 'number' && claims.nbf - 30 > seconds) {
