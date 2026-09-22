@@ -12,11 +12,13 @@ import { DurableObject } from 'cloudflare:workers';
 import { recordBlockedSource } from './db';
 
 const STORAGE_KEY = 'state';
-const STRIKE_DECAY_MS = 7 * 24 * 60 * 60 * 1000;
 
 export interface GuardState {
   source: string;
+  /** Misses inside the current window. */
   misses: number;
+  /** Misses seen from this source since the object was created. */
+  totalMisses: number;
   windowStart: number;
   strikes: number;
   blockedUntil: number;
@@ -39,12 +41,15 @@ export class AbuseGuard extends DurableObject<Env> {
   private settings() {
     const threshold = Math.max(1, Number.parseInt(this.env.ABUSE_MISS_THRESHOLD, 10) || 15);
     const windowMs = Math.max(10, Number.parseInt(this.env.ABUSE_WINDOW_SECONDS, 10) || 600) * 1000;
+    // Strikes age out so one bad afternoon does not raise the penalty for a week.
+    const strikeDecayMs = Math.max(1, Number.parseFloat(this.env.ABUSE_STRIKE_DECAY_HOURS) || 24) * 3_600_000;
     const schedule = this.env.ABUSE_BAN_SCHEDULE.split(',')
       .map((value) => Number.parseInt(value.trim(), 10))
       .filter((value) => Number.isFinite(value) && value > 0);
     return {
       threshold,
       windowMs,
+      strikeDecayMs,
       schedule: schedule.length > 0 ? schedule : [300, 3600, 86400, 604800],
     };
   }
@@ -56,6 +61,7 @@ export class AbuseGuard extends DurableObject<Env> {
     this.cache = stored ?? {
       source: '',
       misses: 0,
+      totalMisses: 0,
       windowStart: now,
       strikes: 0,
       blockedUntil: 0,
@@ -81,12 +87,13 @@ export class AbuseGuard extends DurableObject<Env> {
   }
 
   async recordMiss(source: string, detail: string): Promise<GuardResult> {
-    const { threshold, windowMs, schedule } = this.settings();
+    const { threshold, windowMs, strikeDecayMs, schedule } = this.settings();
     const state = await this.load();
     const now = Date.now();
     state.source = source;
     if (state.firstSeen === 0) state.firstSeen = now;
     state.lastSeen = now;
+    state.totalMisses = (state.totalMisses ?? 0) + 1;
 
     if (now - state.windowStart > windowMs) {
       state.windowStart = now;
@@ -96,7 +103,7 @@ export class AbuseGuard extends DurableObject<Env> {
 
     let justBlocked = false;
     if (state.misses >= threshold) {
-      if (now - state.lastStrikeAt > STRIKE_DECAY_MS) state.strikes = 0;
+      if (now - state.lastStrikeAt > strikeDecayMs) state.strikes = 0;
       state.strikes += 1;
       state.lastStrikeAt = now;
       const banSeconds = schedule[Math.min(state.strikes - 1, schedule.length - 1)];
@@ -127,7 +134,7 @@ export class AbuseGuard extends DurableObject<Env> {
     return recordBlockedSource(this.env, {
       source: state.source,
       strikes: state.strikes,
-      misses: state.misses,
+      misses: state.totalMisses,
       blocked_until: state.blockedUntil,
       first_seen: state.firstSeen,
       last_seen: state.lastSeen,

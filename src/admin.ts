@@ -381,12 +381,31 @@ router.delete('/keys/:id', async (ctx) => {
 });
 
 router.get('/abuse', async (ctx) => {
-  const list = await all<Record<string, unknown>>(
+  const now = nowMs();
+  const rows = await all<{
+    source: string;
+    strikes: number;
+    misses: number;
+    blocked_until: number;
+    first_seen: number;
+    last_seen: number;
+    detail: string | null;
+  }>(
     ctx.env,
     `SELECT source, strikes, misses, blocked_until, first_seen, last_seen, detail
-     FROM blocked_sources ORDER BY last_seen DESC LIMIT 200`,
+     FROM blocked_sources ORDER BY (blocked_until > ?1) DESC, last_seen DESC LIMIT 200`,
+    now,
   );
-  return jsonResponse({ blocked: list, threshold: ctx.env.ABUSE_MISS_THRESHOLD });
+  // History is kept for context, but the dashboard needs to know which rows are
+  // still in force.
+  const blocked = rows.map((row) => ({ ...row, active: row.blocked_until > now }));
+  return jsonResponse({
+    blocked,
+    active: blocked.filter((row) => row.active).length,
+    threshold: ctx.env.ABUSE_MISS_THRESHOLD,
+    ban_schedule: ctx.env.ABUSE_BAN_SCHEDULE,
+    strike_decay_hours: ctx.env.ABUSE_STRIKE_DECAY_HOURS,
+  });
 });
 
 router.delete('/abuse/:source', async (ctx) => {

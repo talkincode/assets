@@ -316,7 +316,7 @@ async function keyRevoke() {
 async function blocked() {
   const data = await request('/admin/api/abuse', {});
   const lines = data.blocked
-    .map((row) => `${row.source.padEnd(22)} strikes ${row.strikes}  until ${new Date(row.blocked_until).toISOString()}  ${row.detail ?? ''}`)
+    .map((row) => `${row.source.padEnd(22)} ${row.active ? 'blocked' : 'expired'}  strikes ${row.strikes}  until ${new Date(row.blocked_until).toISOString()}  ${row.detail ?? ''}`)
     .join('\n');
   output(data, lines || 'nothing blocked');
 }

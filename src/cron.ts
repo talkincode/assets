@@ -65,8 +65,9 @@ export async function sweep(env: Env, exec: ExecutionContext, now = Date.now()):
     if (urls.length > 0) await purgeUrls(env, exec, urls);
   }
 
-  // 3. Blocks expire on their own; this only stops the table growing forever.
-  const cleared = await run(env, 'DELETE FROM blocked_sources WHERE blocked_until < ?', now - 30 * 86_400_000);
+  // 3. Blocks expire on their own; keep a week of history so the dashboard can
+  //    still explain what was blocked, then stop the table growing forever.
+  const cleared = await run(env, 'DELETE FROM blocked_sources WHERE blocked_until < ?', now - 7 * 86_400_000);
   result.blocksCleared = cleared.meta.changes ?? 0;
 
   // 4. Keep the audit trail useful without letting it grow without bound.

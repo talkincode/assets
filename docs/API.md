@@ -71,7 +71,7 @@ curl -X POST "https://assets.talkincode.net/api/upload?expires_in=7d&filename=de
 | POST | `/assets/:hash/restore` | 恢复，可同时改期 `{expires_in}` |
 | GET/POST | `/keys` | 列出 / 创建上传密钥 |
 | DELETE | `/keys/:id` | 吊销密钥 |
-| GET | `/abuse` | 当前封禁来源 |
+| GET | `/abuse` | 封禁来源：每行带 `active` 标记（是否仍在封禁中）与累计猜错次数 |
 | DELETE | `/abuse/:source` | 解封（source 需 URL 编码，如 `203.0.113.0%2F24`） |
 | GET | `/audit` | 操作记录 |
 | GET/PATCH | `/settings` | 运行时策略（`default_ttl_days`、`max_upload_bytes`、`trash_retention_days`） |

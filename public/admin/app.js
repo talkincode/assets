@@ -389,19 +389,20 @@ async function renderAbuse() {
       </p>
     </div>
     <div class="panel">
-      <h2>当前封禁</h2>
+      <h2>封禁来源 <span class="muted small">生效中 ${data.active} / 共 ${state.abuse.length}</span></h2>
       ${state.abuse.length === 0 ? '<div class="empty">暂无封禁来源</div>' : `
       <table>
-        <thead><tr><th>来源</th><th>次数</th><th>累计命中</th><th>解封时间</th><th>原因</th><th></th></tr></thead>
+        <thead><tr><th>来源</th><th>状态</th><th>违规次数</th><th>累计猜错</th><th>解封时间</th><th>最后动作</th><th></th></tr></thead>
         <tbody>
           ${state.abuse.map((row) => `
             <tr>
               <td class="mono">${esc(row.source)}</td>
+              <td>${row.active ? '<span class="pill deleted">生效中</span>' : '<span class="pill">已过期</span>'}</td>
               <td>${row.strikes}</td>
               <td>${row.misses}</td>
               <td class="small">${fmtTime(row.blocked_until)}<br /><span class="muted">${fmtRelative(row.blocked_until)}</span></td>
               <td class="small muted">${esc(row.detail ?? '')}</td>
-              <td><button class="btn" data-action="unblock" data-source="${esc(row.source)}">解封</button></td>
+              <td><button class="btn" data-action="unblock" data-source="${esc(row.source)}">${row.active ? '解封' : '清除'}</button></td>
             </tr>`).join('')}
         </tbody>
       </table>`}

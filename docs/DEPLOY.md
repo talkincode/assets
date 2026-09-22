@@ -135,6 +135,7 @@ export CF_ACCESS_CLIENT_SECRET=...
 | `ABUSE_MISS_THRESHOLD` | `15` | 一个窗口内猜错多少次触发封禁 |
 | `ABUSE_WINDOW_SECONDS` | `600` | 统计窗口 |
 | `ABUSE_BAN_SCHEDULE` | `300,3600,86400,604800` | 逐次加倍的封禁时长（秒） |
+| `ABUSE_STRIKE_DECAY_HOURS` | `24` | 多久没有新违规就清空累计违规次数 |
 | `TRASH_RETENTION_DAYS` | `7` | 手动删除后字节保留天数 |
 | `CF_ZONE_ID` | `talkincode.net` | 精确清除缓存用 |
 | `CF_PURGE_TOKEN` | 未设置 | Secret；设置后删除立即全网生效 |

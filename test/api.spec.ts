@@ -296,8 +296,19 @@ describe('abuse protection', () => {
     const { hash } = (await created.json()) as { hash: string };
     expect((await SELF.fetch(`${BASE}/${hash}/ok.txt`)).status).toBe(200);
 
-    // The dashboard can lift the block again.
+    // The dashboard shows the block as active, with the lifetime miss count.
     const token = await signAccessJwt({ email: TEST_EMAIL });
+    const listed = await SELF.fetch(`${BASE}/admin/api/abuse`, { headers: { 'cf-access-jwt-assertion': token } });
+    const abuse = (await listed.json()) as {
+      active: number;
+      blocked: { source: string; active: boolean; strikes: number; misses: number }[];
+    };
+    const row = abuse.blocked.find((entry) => entry.source === '203.0.113.0/24');
+    expect(row?.active).toBe(true);
+    expect(row?.strikes).toBe(1);
+    expect(row?.misses).toBe(3);
+
+    // The dashboard can lift the block again.
     const unblocked = await SELF.fetch(`${BASE}/admin/api/abuse/${encodeURIComponent('203.0.113.0/24')}`, {
       method: 'DELETE',
       headers: { 'cf-access-jwt-assertion': token },

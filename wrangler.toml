@@ -27,6 +27,8 @@ CORS_ORIGIN = "*"
 ABUSE_MISS_THRESHOLD = "15"
 ABUSE_WINDOW_SECONDS = "600"
 ABUSE_BAN_SCHEDULE = "300,3600,86400,604800"
+# A strike (and the harsher ban that comes with it) fades after this many hours.
+ABUSE_STRIKE_DECAY_HOURS = "24"
 # --- Cloudflare Access (dashboard auth) -------------------------------------
 # Both values come from the Access application; see docs/DEPLOY.md. The worker
 # fails closed (503) on /admin while they are empty.
