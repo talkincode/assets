@@ -305,11 +305,13 @@ async function queueUploads(files) {
 
 function uploadFile(file, params, onProgress) {
   return new Promise((resolve, reject) => {
+    // Filename goes in the query string: XMLHttpRequest headers are ISO-8859-1
+    // only, so a Chinese name in X-Filename throws before the request is sent.
+    if (!params.has('filename')) params.set('filename', file.name);
     const request = new XMLHttpRequest();
     request.open('POST', `/admin/api/assets?${params}`);
     request.withCredentials = true;
     request.setRequestHeader('content-type', file.type || 'application/octet-stream');
-    request.setRequestHeader('x-filename', file.name);
     request.upload.addEventListener('progress', (event) => {
       if (event.lengthComputable) onProgress(Math.round((event.loaded / event.total) * 100));
     });

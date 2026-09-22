@@ -194,7 +194,8 @@ async function put() {
     if (!filename) filename = basename(path);
   }
   if (filename) params.set('filename', String(filename));
-  headers['x-filename'] = String(filename);
+  // Filename stays in the query string. HTTP headers are ISO-8859-1, so a
+  // non-ASCII name in X-Filename fails in both the browser and undici.
   headers['content-type'] = 'application/octet-stream';
 
   const result = await request(`/api/upload?${params}`, { method: 'POST', body, headers, forUpload: true });
