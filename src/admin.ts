@@ -24,7 +24,7 @@ import { all, audit, first, getNumberSetting, run, setSetting, type AssetRow } f
 import { createUploadKey } from './auth';
 import { handleUpload, uploadPolicy } from './upload';
 import { assetCacheUrls, purgeUrls } from './cache';
-import { requireAccessIdentity } from './auth';
+import { accessConfigured, requireAccessIdentity } from './auth';
 import { clientIp, guardReset } from './abuse';
 import { assetSummary } from './assets';
 
@@ -440,7 +440,7 @@ router.get('/settings', async (ctx) => {
       trash_retention_days: ctx.env.TRASH_RETENTION_DAYS,
       abuse_miss_threshold: ctx.env.ABUSE_MISS_THRESHOLD,
       access_allowed_emails: ctx.env.ACCESS_ALLOWED_EMAILS,
-      access_configured: ctx.env.ACCESS_AUD !== '' && ctx.env.ACCESS_TEAM_DOMAIN !== '',
+      access_configured: accessConfigured(ctx.env),
     },
   });
 });

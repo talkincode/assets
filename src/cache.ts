@@ -9,6 +9,8 @@
  *     which makes deletes instant everywhere.
  *
  * Without (2) a stale copy can survive at most CACHE_TTL_SECONDS.
+ * The cache key is the hash alone. Filename and query strings are not part of
+ * it, so a delete purges the one entry that reads actually use.
  */
 
 /** The only cache key for an asset. Filename and query are not part of it. */
