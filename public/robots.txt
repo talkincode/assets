@@ -1,0 +1,3 @@
+# Private asset host: nothing here is meant to be indexed.
+User-agent: *
+Disallow: /

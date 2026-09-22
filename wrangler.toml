@@ -1,0 +1,89 @@
+# talkincode-assets — hash-addressed asset service on Cloudflare Workers.
+# Public surface : https://assets.talkincode.net/<hash>/<filename>
+# Upload API     : POST /api/upload          (upload key)
+# Dashboard      : https://assets.talkincode.net/admin  (Cloudflare Access)
+name = "talkincode-assets"
+main = "src/index.ts"
+compatibility_date = "2026-08-01"
+workers_dev = false
+account_id = "83b40c9065a6f4631f4ab6cda824a21a"
+
+[observability]
+enabled = true
+
+[vars]
+# --- public behaviour -------------------------------------------------------
+PUBLIC_BASE_URL = "https://assets.talkincode.net"
+# Fallback TTL for uploads that do not ask for one. "0" means "never expires".
+DEFAULT_TTL_DAYS = "7"
+MAX_UPLOAD_BYTES = "104857600"
+# How long an edge/browser copy may live. Bounds how long a deleted or expired
+# asset can still be served from cache. Lower = stricter deletes.
+CACHE_TTL_SECONDS = "60"
+CORS_ORIGIN = "*"
+# --- abuse protection -------------------------------------------------------
+# Guessing budget per source network before the source is blocked (see
+# docs/SECURITY.md). Ban lengths escalate over repeated strikes.
+ABUSE_MISS_THRESHOLD = "15"
+ABUSE_WINDOW_SECONDS = "600"
+ABUSE_BAN_SCHEDULE = "300,3600,86400,604800"
+# --- Cloudflare Access (dashboard auth) -------------------------------------
+# Both values come from the Access application; see docs/DEPLOY.md. The worker
+# fails closed (503) on /admin while they are empty.
+ACCESS_TEAM_DOMAIN = ""
+ACCESS_AUD = ""
+# Comma separated. The dashboard only accepts identities in this list.
+ACCESS_ALLOWED_EMAILS = "jamiesun.net@gmail.com"
+# Access service tokens (for the CLI) are trusted once Access has vetted them.
+ACCESS_ALLOW_SERVICE_TOKENS = "true"
+# --- lifecycle --------------------------------------------------------------
+# How long a deleted (not expired) asset keeps its bytes so it can be restored.
+TRASH_RETENTION_DAYS = "7"
+# --- optional instant purge -------------------------------------------------
+# When CF_PURGE_TOKEN (secret) + CF_ZONE_ID are set, mutations purge the exact
+# URL from Cloudflare's cache instead of waiting CACHE_TTL_SECONDS.
+CF_ZONE_ID = "e452c151cde1d9856336ffd76f80bf75"
+
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "talkincode-assets"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "talkincode-assets"
+database_id = "dc3e79a9-60f8-4bc0-87eb-6c1782fb6b5d"
+
+[durable_objects]
+bindings = [{ name = "ABUSE", class_name = "AbuseGuard" }]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["AbuseGuard"]
+
+[triggers]
+crons = ["17 * * * *"]
+
+# Brute-force protection, layer 1: per-source-IP request budgets.
+[[ratelimits]]
+name = "READ_LIMITER"
+namespace_id = "1001"
+simple = { limit = 1200, period = 60 }
+
+[[ratelimits]]
+name = "MISS_LIMITER"
+namespace_id = "1002"
+simple = { limit = 40, period = 60 }
+
+[[ratelimits]]
+name = "UPLOAD_LIMITER"
+namespace_id = "1003"
+simple = { limit = 120, period = 60 }
+
+[assets]
+directory = "./public"
+binding = "STATIC"
+not_found_handling = "none"
+
+[[routes]]
+pattern = "assets.talkincode.net"
+custom_domain = true

@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>Talkincode Assets</title>
+    <link rel="icon" href="/favicon.svg" />
+    <link rel="stylesheet" href="/admin/style.css" />
+  </head>
+  <body>
+    <div class="layout">
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-dot"></span>
+          <div>
+            <strong>Assets</strong>
+            <span class="muted" id="brand-host">talkincode.net</span>
+          </div>
+        </div>
+        <nav id="nav">
+          <button class="nav-item" data-view="assets">资产</button>
+          <button class="nav-item" data-view="upload">上传</button>
+          <button class="nav-item" data-view="keys">上传密钥</button>
+          <button class="nav-item" data-view="abuse">安全防护</button>
+          <button class="nav-item" data-view="settings">设置</button>
+        </nav>
+        <div class="sidebar-foot">
+          <div class="who" id="who">…</div>
+          <a id="base-link" class="muted small" href="#" target="_blank" rel="noreferrer"></a>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <h1 id="view-title">资产</h1>
+          <div class="topbar-tools" id="view-tools"></div>
+        </header>
+        <section id="view" class="view"></section>
+      </main>
+    </div>
+
+    <div id="modal" class="modal" hidden>
+      <div class="modal-backdrop" data-close="1"></div>
+      <div class="modal-card" id="modal-card"></div>
+    </div>
+    <div id="toasts" class="toasts"></div>
+    <script type="module" src="/admin/app.js"></script>
+  </body>
+</html>
