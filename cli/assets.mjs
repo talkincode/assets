@@ -20,8 +20,8 @@ import process from 'node:process';
 
 const HELP = `talkincode-assets CLI
 
-  assets put <file|-> [--expire 7d|never] [--name FILE] [--hash HASH] [--note TEXT]
-  assets ls [--status live|expired|deleted|all] [--kind KIND] [--q TEXT] [--limit N]
+  assets put <file|-> [--expire 7d|never] [--name FILE] [--hash HASH] [--note TEXT] [--tags a,b]
+  assets ls [--status live|expired|deleted|all] [--kind KIND] [--tag TAG] [--q TEXT] [--limit N]
   assets show <hash>
   assets rm <hash> [--hard]
   assets restore <hash> [--expire 7d]
@@ -174,6 +174,7 @@ async function put() {
   if (flags.expire) params.set('expires_in', String(flags.expire));
   if (flags.hash) params.set('hash', String(flags.hash));
   if (flags.note) params.set('note', String(flags.note));
+  if (flags.tags) params.set('tags', String(flags.tags));
 
   let body;
   let filename = flags.name;
@@ -209,6 +210,7 @@ async function ls() {
   params.set('limit', String(flags.limit ?? 50));
   if (flags.q) params.set('q', String(flags.q));
   if (flags.kind) params.set('kind', String(flags.kind));
+  if (flags.tag) params.set('tag', String(flags.tag));
   const data = await request(`/admin/api/assets?${params}`, {});
   const lines = data.assets
     .map((asset) => `${asset.hash}  ${String(asset.status).padEnd(8)} ${humanSize(asset.size).padStart(9)}  ${humanExpiry(asset).padEnd(12)} ${asset.filename}`)
@@ -231,6 +233,7 @@ async function show() {
     `created:   ${new Date(asset.created_at).toISOString()}`,
     `expires:   ${asset.expires_at ? new Date(asset.expires_at).toISOString() : 'never'}`,
     `downloads: ${asset.downloads}`,
+    `tags:      ${(asset.tags ?? []).join(', ')}`,
     `note:      ${asset.note ?? ''}`,
   ].join('\n');
   output(data, human, asset.url);

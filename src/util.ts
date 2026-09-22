@@ -247,6 +247,75 @@ export function isActiveContent(contentType: string): boolean {
   return ACTIVE_CONTENT_TYPES.has(type) || type.includes('javascript');
 }
 
+export const MAX_TAGS = 16;
+export const MAX_TAG_LENGTH = 40;
+
+/**
+ * Tags are for dashboard grouping, not security. Commas separate them on the
+ * wire; each tag is trimmed, control characters are dropped, empties ignored,
+ * and duplicates are removed while keeping the first occurrence.
+ */
+export function normalizeTags(input: unknown): string[] {
+  const parts: string[] = [];
+  if (input === null || input === undefined) return parts;
+  if (Array.isArray(input)) {
+    for (const value of input) {
+      if (typeof value === 'string') parts.push(value);
+      else if (value !== null && value !== undefined) parts.push(String(value));
+    }
+  } else if (typeof input === 'string') {
+    parts.push(...input.split(/[,，]/));
+  } else {
+    throw new HttpError(400, 'invalid_tags', 'tags must be a string or an array of strings');
+  }
+
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of parts) {
+    // eslint-disable-next-line no-control-regex
+    const tag = raw.normalize('NFC').replace(/[\u0000-\u001f\u007f]/g, '').trim();
+    if (tag === '') continue;
+    if (tag.length > MAX_TAG_LENGTH) {
+      throw new HttpError(400, 'invalid_tags', `each tag must be at most ${MAX_TAG_LENGTH} characters`);
+    }
+    if (seen.has(tag)) continue;
+    seen.add(tag);
+    out.push(tag);
+    if (out.length > MAX_TAGS) {
+      throw new HttpError(400, 'invalid_tags', `at most ${MAX_TAGS} tags per asset`);
+    }
+  }
+  return out;
+}
+
+/** Persist as JSON text, or NULL when the asset has no tags. */
+export function serializeTags(tags: string[]): string | null {
+  return tags.length === 0 ? null : JSON.stringify(tags);
+}
+
+/** Read the JSON column back into an array; junk values become []. */
+export function decodeTags(raw: string | null | undefined): string[] {
+  if (raw === null || raw === undefined || raw.trim() === '') return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const value of parsed) {
+      if (typeof value !== 'string') continue;
+      // eslint-disable-next-line no-control-regex
+      const tag = value.normalize('NFC').replace(/[\u0000-\u001f\u007f]/g, '').trim();
+      if (tag === '' || tag.length > MAX_TAG_LENGTH || seen.has(tag)) continue;
+      seen.add(tag);
+      out.push(tag);
+      if (out.length >= MAX_TAGS) break;
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 export async function sha256Hex(input: string): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input));
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');

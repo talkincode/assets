@@ -11,12 +11,14 @@ import {
   errorResponse,
   hashProblem,
   jsonResponse,
+  normalizeTags,
   nowMs,
   parseDuration,
   parseTimestamp,
   randomHash,
   requireString,
   sanitizeFilename,
+  serializeTags,
   toErrorResponse,
 } from './util';
 import { Router, type Ctx } from './router';
@@ -142,6 +144,7 @@ router.get('/assets', async (ctx) => {
   const q = url.searchParams.get('q')?.trim() ?? '';
   const status = url.searchParams.get('status') ?? 'live';
   const kind = url.searchParams.get('kind') ?? '';
+  const tag = url.searchParams.get('tag')?.trim() ?? '';
   const limit = clampInt(url.searchParams.get('limit'), 1, MAX_PAGE_SIZE, 50);
   const offset = clampInt(url.searchParams.get('offset'), 0, 1_000_000, 0);
   const now = nowMs();
@@ -170,9 +173,16 @@ router.get('/assets', async (ctx) => {
   } else if (kind === 'other') {
     where.push("NOT (content_type LIKE 'image/%' OR content_type LIKE 'audio/%' OR content_type LIKE 'video/%' OR content_type LIKE 'text/%')");
   }
+  if (tag) {
+    // Exact membership in the JSON array column (tags are normalized before write).
+    where.push(
+      `EXISTS (SELECT 1 FROM json_each(COALESCE(NULLIF(tags, ''), '[]')) WHERE value = ?)`,
+    );
+    binds.push(tag);
+  }
   if (q) {
-    where.push('(hash LIKE ? OR filename LIKE ? OR note LIKE ?)');
-    binds.push(`%${q}%`, `%${q}%`, `%${q}%`);
+    where.push('(hash LIKE ? OR filename LIKE ? OR note LIKE ? OR tags LIKE ?)');
+    binds.push(`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`);
   }
   const whereSql = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
   const total = await first<{ n: number }>(env, `SELECT COUNT(*) AS n FROM assets ${whereSql}`, ...binds);
@@ -187,8 +197,26 @@ router.get('/assets', async (ctx) => {
     total: total?.n ?? 0,
     limit,
     offset,
+    tag: tag || null,
     assets: rows.map((row) => assetSummary(env, row, now)),
   });
+});
+
+/** Distinct tags with live-asset counts, for the dashboard tag nav. */
+router.get('/tags', async (ctx) => {
+  const now = nowMs();
+  const rows = await all<{ tag: string; count: number }>(
+    ctx.env,
+    `SELECT je.value AS tag, COUNT(*) AS count
+     FROM assets
+     JOIN json_each(COALESCE(NULLIF(assets.tags, ''), '[]')) AS je
+     WHERE assets.deleted_at IS NULL
+       AND (assets.expires_at IS NULL OR assets.expires_at > ?)
+     GROUP BY je.value
+     ORDER BY count DESC, je.value COLLATE NOCASE ASC`,
+    now,
+  );
+  return jsonResponse({ tags: rows });
 });
 
 router.post('/assets', (ctx) => {
@@ -232,8 +260,12 @@ router.patch('/assets/:hash', async (ctx) => {
     updates.push('note = ?');
     binds.push(body.note === null ? null : String(body.note).slice(0, 500));
   }
+  if ('tags' in body) {
+    updates.push('tags = ?');
+    binds.push(serializeTags(normalizeTags(body.tags)));
+  }
   if (updates.length === 0) {
-    throw new HttpError(400, 'nothing_to_update', 'pass expires_in, expires_at, never, filename or note');
+    throw new HttpError(400, 'nothing_to_update', 'pass expires_in, expires_at, never, filename, note or tags');
   }
 
   await run(env, `UPDATE assets SET ${updates.join(', ')} WHERE hash = ?`, ...binds, hash);

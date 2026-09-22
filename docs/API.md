@@ -29,6 +29,7 @@
 | Query | `expires_at` | 绝对时间（ISO 或 epoch） |
 | Query | `hash` | 自定义 hash：16–64 位 `[A-Za-z0-9_-]` |
 | Query | `note` | 备注，dashboard 可见 |
+| Query | `tags` | 标签，逗号分隔（也可用中文逗号）；最多 16 个，每个最多 40 字符 |
 
 ```bash
 curl -X POST "https://assets.talkincode.net/api/upload?expires_in=7d&filename=demo.mp4" \
@@ -43,6 +44,7 @@ curl -X POST "https://assets.talkincode.net/api/upload?expires_in=7d&filename=de
   "filename": "demo.mp4",
   "size": 1048576,
   "content_type": "video/mp4",
+  "tags": ["demo", "product"],
   "created_at": 1789000000000,
   "expires_at": 1789604800000,
   "url": "https://assets.talkincode.net/9fK2mQ7dLpR1sVx8YzA3bC/demo.mp4"
@@ -66,13 +68,14 @@ curl -X POST "https://assets.talkincode.net/api/upload?expires_in=7d&filename=de
 | --- | --- | --- |
 | GET | `/me` | 当前身份与外链前缀 |
 | GET | `/stats` | 总量、占用、按类型分布、封禁数、密钥数 |
-| GET | `/assets` | 列表：`status=live\|expired\|deleted\|all`、`kind`、`q`、`limit`、`offset` |
+| GET | `/assets` | 列表：`status=live\|expired\|deleted\|all`、`kind`、`tag`、`q`、`limit`、`offset` |
 | POST | `/assets` | 上传（dashboard 登录态，无需上传密钥） |
 | GET | `/assets/:hash` | 详情 + 该资产的操作记录 |
-| PATCH | `/assets/:hash` | `{expires_in}` / `{expires_at}` / `{never:true}` / `{filename}` / `{note}` |
+| PATCH | `/assets/:hash` | `{expires_in}` / `{expires_at}` / `{never:true}` / `{filename}` / `{note}` / `{tags}` |
 | POST | `/assets/:hash/rotate` | 换 hash：`{hash?}`，留空则随机；返回新链接与旧链接 |
 | DELETE | `/assets/:hash` | 软删除（字节进回收站）；`?purge=1` 彻底删除 |
 | POST | `/assets/:hash/restore` | 恢复，可同时改期 `{expires_in}` |
+| GET | `/tags` | 有效资产上的标签与数量（dashboard 侧栏导航） |
 | GET/POST | `/keys` | 列出 / 创建上传密钥 |
 | DELETE | `/keys/:id` | 吊销密钥 |
 | GET | `/abuse` | 封禁来源：每行带 `active` 标记（是否仍在封禁中）与累计猜错次数 |

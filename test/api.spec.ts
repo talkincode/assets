@@ -203,6 +203,43 @@ describe('upload and delivery', () => {
     expect(await env.BUCKET.head(row!.object_key)).not.toBeNull();
   });
 
+  it('stores tags on upload, filters by tag, and lets admin edit them', async () => {
+    const created = await upload('tagged body', { key, query: 'tags=课件,PDF&expires_in=7d' });
+    expect(created.status).toBe(201);
+    const body = (await created.json()) as { hash: string; tags: string[] };
+    expect(body.tags).toEqual(['课件', 'PDF']);
+
+    const token = await signAccessJwt({ email: TEST_EMAIL });
+    const auth = { 'cf-access-jwt-assertion': token, 'content-type': 'application/json' };
+
+    const listed = await SELF.fetch(`${BASE}/admin/api/assets?tag=${encodeURIComponent('课件')}`, {
+      headers: auth,
+    });
+    expect(listed.status).toBe(200);
+    const listBody = (await listed.json()) as { assets: { hash: string; tags: string[] }[] };
+    expect(listBody.assets.some((asset) => asset.hash === body.hash)).toBe(true);
+
+    const tags = await SELF.fetch(`${BASE}/admin/api/tags`, { headers: auth });
+    expect(tags.status).toBe(200);
+    const tagBody = (await tags.json()) as { tags: { tag: string; count: number }[] };
+    expect(tagBody.tags.some((row) => row.tag === '课件' && row.count >= 1)).toBe(true);
+
+    const patched = await SELF.fetch(`${BASE}/admin/api/assets/${body.hash}`, {
+      method: 'PATCH',
+      headers: auth,
+      body: JSON.stringify({ tags: '微课' }),
+    });
+    expect(patched.status).toBe(200);
+    expect(((await patched.json()) as { asset: { tags: string[] } }).asset.tags).toEqual(['微课']);
+
+    const cleared = await SELF.fetch(`${BASE}/admin/api/assets/${body.hash}`, {
+      method: 'PATCH',
+      headers: auth,
+      body: JSON.stringify({ tags: '' }),
+    });
+    expect(((await cleared.json()) as { asset: { tags: string[] } }).asset.tags).toEqual([]);
+  });
+
   it('answers range requests and HEAD without touching the body', async () => {
     const { hash } = (await (await upload('0123456789', { key })).json()) as { hash: string };
     const ranged = await SELF.fetch(`${BASE}/${hash}/r.txt`, { headers: { range: 'bytes=2-5' } });

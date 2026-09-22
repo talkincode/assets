@@ -34,15 +34,17 @@ Access service token 写到 `~/.config/talkincode-assets/env`（600），所以�
 ### 上传
 
 ```bash
-./cli/assets.mjs put ./demo.mp4 --expire 7d --note "产品演示"
+./cli/assets.mjs put ./demo.mp4 --expire 7d --note "产品演示" --tags "demo,product"
 ./cli/assets.mjs put ./report.pdf --expire never
-./cli/assets.mjs put ./image.png --name hero-shot.png --expire 30d
+./cli/assets.mjs put ./image.png --name hero-shot.png --expire 30d --tags 封面
 cat ./log.txt | ./cli/assets.mjs put - --name run.log --expire 1d
 URL=$(./cli/assets.mjs put ./a.png -q)
 ./cli/assets.mjs put ./a.png --expire 7d --json | jq -r .url
+./cli/assets.mjs ls --tag demo
 ```
 
 `--expire` 支持 `30m` / `12h` / `7d` / `2w` / 秒数 / `never`；省略则用服务端默认值。
+`--tags` 为逗号分隔标签（最多 16 个）；`ls --tag` 按单个标签精确筛选。
 
 ### 查询与管理（需要 Access Service Token）
 

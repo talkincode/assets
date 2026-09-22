@@ -12,10 +12,12 @@ import {
   guessContentType,
   hashProblem,
   jsonResponse,
+  normalizeTags,
   parseDuration,
   parseTimestamp,
   randomHash,
   sanitizeFilename,
+  serializeTags,
 } from './util';
 import { audit, first, getNumberSetting, run } from './db';
 import type { Ctx } from './router';
@@ -136,6 +138,10 @@ export async function handleUpload(ctx: Ctx, actor: UploadActor): Promise<Respon
   const noteRaw = url.searchParams.get('note') ?? request.headers.get('x-note');
   // Same ceiling as the dashboard PATCH, so a header cannot store an unbounded note.
   const note = noteRaw === null ? null : noteRaw.slice(0, 500);
+  // Tags stay in the query string (or a JSON-ish header of ASCII-safe commas).
+  const tagsRaw = url.searchParams.get('tags') ?? request.headers.get('x-tags');
+  const tags = tagsRaw === null ? [] : normalizeTags(tagsRaw);
+  const tagsJson = serializeTags(tags);
   const objectKey = `objects/${randomHash(26)}`;
 
   let size = 0;
@@ -171,9 +177,9 @@ export async function handleUpload(ctx: Ctx, actor: UploadActor): Promise<Respon
   try {
     await run(
       env,
-      `INSERT INTO assets (hash, object_key, filename, content_type, size, etag, note, key_id,
+      `INSERT INTO assets (hash, object_key, filename, content_type, size, etag, note, tags, key_id,
                            uploader_ip, uploader_agent, created_at, expires_at, downloads)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
       hash,
       objectKey,
       filename,
@@ -181,6 +187,7 @@ export async function handleUpload(ctx: Ctx, actor: UploadActor): Promise<Respon
       size,
       etag,
       note,
+      tagsJson,
       actor.keyId,
       clientIp(request),
       request.headers.get('user-agent'),
@@ -202,7 +209,7 @@ export async function handleUpload(ctx: Ctx, actor: UploadActor): Promise<Respon
       action: 'upload',
       target: hash,
       ip: clientIp(request),
-      detail: `${filename} (${size} bytes)`,
+      detail: tags.length > 0 ? `${filename} (${size} bytes) [${tags.join(', ')}]` : `${filename} (${size} bytes)`,
     });
   } catch (error) {
     // The asset is already durable. Failing the request here would invite a
@@ -216,6 +223,7 @@ export async function handleUpload(ctx: Ctx, actor: UploadActor): Promise<Respon
       filename,
       size,
       content_type: contentType,
+      tags,
       created_at: now,
       expires_at: expiresAt,
       url: `${env.PUBLIC_BASE_URL}/${hash}/${encodeURIComponent(filename)}`,

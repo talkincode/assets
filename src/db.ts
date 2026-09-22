@@ -3,7 +3,7 @@
  * lookup, so route handlers never hand-write SQL for common reads.
  */
 
-import { assetKind, type AssetKind } from './util';
+import { assetKind, decodeTags, type AssetKind } from './util';
 
 export interface AssetRow {
   hash: string;
@@ -13,6 +13,7 @@ export interface AssetRow {
   size: number;
   etag: string | null;
   note: string | null;
+  tags: string | null;
   key_id: string | null;
   uploader_ip: string | null;
   uploader_agent: string | null;
@@ -62,7 +63,8 @@ export async function getAsset(env: Env, hash: string): Promise<AssetRow | null>
   return first<AssetRow>(env, 'SELECT * FROM assets WHERE hash = ?', hash);
 }
 
-export interface AssetView extends AssetRow {
+export interface AssetView extends Omit<AssetRow, 'tags'> {
+  tags: string[];
   kind: AssetKind;
   status: 'live' | 'expired' | 'deleted' | 'purged';
   url_path: string;
@@ -78,6 +80,7 @@ export function describeAsset(asset: AssetRow, now: number): AssetView {
         : 'live';
   return {
     ...asset,
+    tags: decodeTags(asset.tags),
     kind: assetKind(asset.content_type),
     status,
     url_path: `/${asset.hash}/${encodeURIComponent(asset.filename)}`,

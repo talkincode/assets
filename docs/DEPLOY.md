@@ -23,6 +23,13 @@ npm run db:init          # 远程
 npm run db:init:local    # 本地开发库（wrangler dev 用）
 ```
 
+已有库加标签列（只需跑一次）：
+
+```bash
+npm run db:migrate:tags
+npm run db:migrate:tags:local
+```
+
 ## 2. 首次部署
 
 ```bash

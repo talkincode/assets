@@ -11,6 +11,9 @@ import {
   parseTimestamp,
   assetKind,
   isActiveContent,
+  normalizeTags,
+  serializeTags,
+  decodeTags,
 } from '../src/util';
 import { parseRange } from '../src/assets';
 
@@ -102,6 +105,16 @@ describe('filenames', () => {
     expect(isActiveContent('application/xml')).toBe(true);
     expect(isActiveContent('text/plain')).toBe(false);
     expect(isActiveContent('image/png')).toBe(false);
+  });
+
+  it('normalizes tag lists from commas and arrays', () => {
+    expect(normalizeTags('课件, PDF， 课件')).toEqual(['课件', 'PDF']);
+    expect(normalizeTags(['a', ' a ', '', 'b'])).toEqual(['a', 'b']);
+    expect(serializeTags(['a', 'b'])).toBe('["a","b"]');
+    expect(serializeTags([])).toBeNull();
+    expect(decodeTags('["课件","PDF"]')).toEqual(['课件', 'PDF']);
+    expect(decodeTags(null)).toEqual([]);
+    expect(() => normalizeTags('x'.repeat(41))).toThrowError(/40/);
   });
 });
 

@@ -12,7 +12,8 @@ const state = {
   stats: null,
   assets: [],
   total: 0,
-  filters: { q: '', status: 'live', kind: '', limit: 48, offset: 0 },
+  filters: { q: '', status: 'live', kind: '', tag: '', limit: 48, offset: 0 },
+  tags: [],
   keys: [],
   abuse: [],
   settings: null,
@@ -113,6 +114,21 @@ function statusPill(asset) {
   return `<span class="pill ${asset.status}">${esc(asset.status)}</span>`;
 }
 
+function tagPills(tags, { clickable = false, active = '' } = {}) {
+  if (!tags || tags.length === 0) return '';
+  return tags.map((tag) => {
+    const isActive = active && tag === active;
+    if (clickable) {
+      return `<button type="button" class="tag-chip${isActive ? ' active' : ''}" data-action="filter-tag" data-tag="${esc(tag)}">${esc(tag)}</button>`;
+    }
+    return `<span class="tag-chip">${esc(tag)}</span>`;
+  }).join('');
+}
+
+function formatTagsInput(tags) {
+  return Array.isArray(tags) ? tags.join(', ') : '';
+}
+
 // ---------------------------------------------------------------- rendering
 
 function setTitle(title, tools = '') {
@@ -135,19 +151,55 @@ async function loadStats() {
   state.stats = await api('/admin/api/stats');
 }
 
+async function loadTags() {
+  try {
+    const data = await api('/admin/api/tags');
+    state.tags = data.tags ?? [];
+  } catch {
+    state.tags = [];
+  }
+  renderTagNav();
+}
+
+function renderTagNav() {
+  const list = $('#tag-nav-list');
+  if (!list) return;
+  const active = state.filters.tag;
+  const allActive = !active;
+  const items = [
+    `<button type="button" class="tag-nav-item${allActive ? ' active' : ''}" data-action="filter-tag" data-tag="">全部 <span class="muted">${state.stats?.assets?.live ?? ''}</span></button>`,
+    ...state.tags.map((row) => `
+      <button type="button" class="tag-nav-item${active === row.tag ? ' active' : ''}" data-action="filter-tag" data-tag="${esc(row.tag)}">
+        <span class="tag-nav-name" title="${esc(row.tag)}">${esc(row.tag)}</span>
+        <span class="muted">${row.count}</span>
+      </button>`),
+  ];
+  list.innerHTML = items.join('') || '<div class="muted small">暂无标签</div>';
+}
+
+function selectTag(tag) {
+  state.filters.tag = tag || '';
+  state.filters.offset = 0;
+  state.view = 'assets';
+  renderTagNav();
+  renderShell().catch(showError);
+}
+
 async function loadAssets() {
-  const { q, status, kind, limit, offset } = state.filters;
+  const { q, status, kind, tag, limit, offset } = state.filters;
   const params = new URLSearchParams({ status, limit: String(limit), offset: String(offset) });
   if (q) params.set('q', q);
   if (kind) params.set('kind', kind);
+  if (tag) params.set('tag', tag);
   const data = await api(`/admin/api/assets?${params}`);
   state.assets = data.assets;
   state.total = data.total;
 }
 
 async function renderAssets() {
+  const tagFilter = state.filters.tag;
   setTitle('资产', `
-    <input type="search" id="q" placeholder="搜索 hash / 文件名" value="${esc(state.filters.q)}" />
+    <input type="search" id="q" placeholder="搜索 hash / 文件名 / 标签" value="${esc(state.filters.q)}" />
     <select id="status">
       ${['live', 'expired', 'deleted', 'all'].map((value) =>
         `<option value="${value}"${state.filters.status === value ? ' selected' : ''}>${
@@ -162,8 +214,9 @@ async function renderAssets() {
   `);
   view.innerHTML = `<div class="loading">加载中…</div>`;
 
-  await Promise.all([loadStats(), loadAssets()]);
+  await Promise.all([loadStats(), loadAssets(), loadTags()]);
   const stats = state.stats;
+  renderTagNav();
 
   const cards = state.assets.map((asset) => `
     <article class="card" data-hash="${esc(asset.hash)}">
@@ -178,6 +231,7 @@ async function renderAssets() {
           ${statusPill(asset)}
         </div>
         <div class="hash" data-action="copy" data-copy="${esc(asset.url)}" title="${esc(asset.url)}">${esc(asset.hash)}</div>
+        ${asset.tags?.length ? `<div class="tag-row">${tagPills(asset.tags, { clickable: true, active: tagFilter })}</div>` : ''}
         <div class="meta-row">
           <span>${fmtSize(asset.size)}</span>
           <span>${esc(asset.kind)}</span>
@@ -201,6 +255,7 @@ async function renderAssets() {
       <div class="stat"><b>${stats.assets.downloads}</b><span>累计下载</span></div>
       <div class="stat"><b>${stats.blocked_sources}</b><span>封禁来源</span></div>
     </div>
+    ${tagFilter ? `<div class="filter-banner">正在筛选标签 <strong>${esc(tagFilter)}</strong> <button class="btn ghost small" data-action="filter-tag" data-tag="">清除</button></div>` : ''}
     ${cards ? `<div class="asset-grid">${cards}</div>` : '<div class="empty">没有匹配的资产</div>'}
     <p class="muted small" style="margin-top:16px">共 ${state.total} 条 · 显示 ${state.assets.length} 条</p>
   `;
@@ -238,6 +293,7 @@ function uploadRow(item) {
 
 function renderUpload() {
   setTitle('上传', '<span class="muted small">通过 dashboard 上传无需密钥；agent 请使用 CLI + 上传密钥</span>');
+  loadTags().catch(() => undefined);
   view.innerHTML = `
     <div class="panel">
       <div class="dropzone" id="dropzone">
@@ -257,8 +313,10 @@ function renderUpload() {
           </select>
         </label>
         <label class="field"><span>显示文件名（可选）</span><input type="text" id="filename" placeholder="留空则用原文件名" /></label>
+        <label class="field"><span>标签（可选）</span><input type="text" id="tags" placeholder="逗号分隔，如 课件, PDF" list="tag-suggestions" /></label>
         <label class="field"><span>备注（可选）</span><input type="text" id="note" placeholder="用途说明" /></label>
       </div>
+      <datalist id="tag-suggestions">${state.tags.map((row) => `<option value="${esc(row.tag)}"></option>`).join('')}</datalist>
       <div class="upload-list" id="uploads">${state.uploads.map(uploadRow).join('')}</div>
     </div>
   `;
@@ -284,6 +342,8 @@ async function queueUploads(files) {
       if (filename && files.length === 1) params.set('filename', filename);
       const note = $('#note')?.value.trim();
       if (note) params.set('note', note);
+      const tags = $('#tags')?.value.trim();
+      if (tags) params.set('tags', tags);
       const ttl = $('#ttl')?.value ?? 'default';
       if (ttl !== 'default') params.set('expires_in', ttl);
       const result = await uploadFile(file, params, (percent) => {
@@ -294,7 +354,7 @@ async function queueUploads(files) {
       item.url = result.url;
       item.status = `完成 · ${result.hash}`;
       toast(`上传成功：${result.hash}`, 'ok');
-      await loadStats();
+      await Promise.all([loadStats(), loadTags()]);
     } catch (error) {
       item.status = `失败：${error.message}`;
       toast(error.message, 'error');
@@ -497,8 +557,16 @@ async function openAsset(hash) {
         <dt>来源</dt><dd>${esc(asset.key_id ? `密钥 ${asset.key_id}` : 'dashboard')} · ${esc(asset.uploader_ip ?? '—')}</dd>
         <dt>下载</dt><dd>${asset.downloads} 次 · 最近 ${asset.last_access_at ? fmtRelative(asset.last_access_at) : '—'}</dd>
         <dt>备注</dt><dd>${esc(asset.note ?? '—')}</dd>
+        <dt>标签</dt><dd>${asset.tags?.length ? tagPills(asset.tags, { clickable: true, active: state.filters.tag }) : '<span class="muted">无</span>'}</dd>
       </dl>
       <div class="row-form" style="margin-top:16px">
+        <label class="field grow"><span>编辑标签</span>
+          <input type="text" id="m-tags" value="${esc(formatTagsInput(asset.tags))}" placeholder="逗号分隔，留空清除" list="m-tag-suggestions" />
+        </label>
+        <button class="btn" id="m-tags-save">保存标签</button>
+        <datalist id="m-tag-suggestions">${state.tags.map((row) => `<option value="${esc(row.tag)}"></option>`).join('')}</datalist>
+      </div>
+      <div class="row-form" style="margin-top:8px">
         <button class="btn" data-action="copy" data-copy="${esc(asset.url)}">复制链接</button>
         <a class="btn" href="${esc(asset.url)}" target="_blank" rel="noreferrer">打开</a>
         <a class="btn" href="${esc(asset.url)}?dl=1" target="_blank" rel="noreferrer">下载</a>
@@ -541,6 +609,19 @@ async function openAsset(hash) {
           body: value === 'never' ? { never: true } : { expires_in: value },
         });
         toast('过期时间已更新', 'ok');
+        await openAsset(asset.hash);
+        if (state.view === 'assets') await renderAssets();
+      } catch (error) { showError(error); }
+    });
+
+    $('#m-tags-save').addEventListener('click', async () => {
+      try {
+        await api(`/admin/api/assets/${asset.hash}`, {
+          method: 'PATCH',
+          body: { tags: $('#m-tags').value },
+        });
+        toast('标签已更新', 'ok');
+        await loadTags();
         await openAsset(asset.hash);
         if (state.view === 'assets') await renderAssets();
       } catch (error) { showError(error); }
@@ -622,6 +703,11 @@ document.addEventListener('click', async (event) => {
     const action = target.dataset.action;
     if (action === 'copy') return copy(target.dataset.copy);
     if (action === 'open') return openAsset(target.dataset.hash);
+    if (action === 'filter-tag') {
+      modal.hidden = true;
+      selectTag(target.dataset.tag ?? '');
+      return;
+    }
     if (action === 'revoke-key') {
       if (!confirm('吊销后使用该密钥的上传会立即失败')) return;
       try {
@@ -679,6 +765,7 @@ async function boot() {
     $('#base-link').href = state.me.public_base_url;
     $('#brand-host').textContent = new URL(state.me.public_base_url).host;
     await loadStats();
+    await loadTags();
     await renderShell();
   } catch (error) {
     showError(error);

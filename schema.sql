@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS assets (
   size            INTEGER NOT NULL DEFAULT 0,
   etag            TEXT,
   note            TEXT,
+  tags            TEXT,                   -- JSON string array, e.g. ["demo","product"]
   key_id          TEXT,                   -- upload key that created it (NULL = dashboard)
   uploader_ip     TEXT,
   uploader_agent  TEXT,
