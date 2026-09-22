@@ -6,6 +6,14 @@
     <meta name="robots" content="noindex, nofollow" />
     <title>Talkincode Assets</title>
     <link rel="icon" href="/favicon.svg" />
+    <script>
+      // Set the theme before first paint so the page never flashes dark.
+      try {
+        var saved = localStorage.getItem('assets-theme');
+        if (!saved) saved = matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+        document.documentElement.dataset.theme = saved;
+      } catch (e) {}
+    </script>
     <link rel="stylesheet" href="/admin/style.css" />
   </head>
   <body>
@@ -27,6 +35,7 @@
         </nav>
         <div class="sidebar-foot">
           <div class="who" id="who">…</div>
+          <button class="btn ghost small" id="theme-toggle" type="button">主题</button>
           <a id="base-link" class="muted small" href="#" target="_blank" rel="noreferrer"></a>
         </div>
       </aside>

@@ -13,6 +13,26 @@
   --danger: #ff6b6b;
   --radius: 10px;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --topbar-bg: rgba(11, 13, 16, 0.86);
+  --on-accent: #08101f;
+}
+
+/* Light theme, chosen by the toggle in the sidebar (prefers-color-scheme on
+   first visit). Only the tokens change — layout rules are shared. */
+[data-theme='light'] {
+  --bg: #f5f6f8;
+  --panel: #ffffff;
+  --panel-2: #eef0f4;
+  --border: #dde1e7;
+  --text: #14181d;
+  --muted: #5b6673;
+  --accent: #2f5fe0;
+  --accent-soft: rgba(47, 95, 224, 0.1);
+  --ok: #0f9d63;
+  --warn: #b0731a;
+  --danger: #d64545;
+  --topbar-bg: rgba(245, 246, 248, 0.88);
+  --on-accent: #ffffff;
 }
 
 * { box-sizing: border-box; }
@@ -68,7 +88,7 @@ nav { display: flex; flex-direction: column; gap: 2px; }
 .topbar {
   display: flex; align-items: center; justify-content: space-between; gap: 16px;
   padding: 18px 26px; border-bottom: 1px solid var(--border); position: sticky; top: 0;
-  background: rgba(11, 13, 16, 0.86); backdrop-filter: blur(8px); z-index: 5;
+  background: var(--topbar-bg); backdrop-filter: blur(8px); z-index: 5;
 }
 .topbar h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: 0.01em; }
 .topbar-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -81,7 +101,7 @@ button, input, select, textarea { font: inherit; color: var(--text); }
   padding: 7px 12px; border-radius: 8px; cursor: pointer; white-space: nowrap;
 }
 .btn:hover { border-color: #33404f; }
-.btn.primary { background: var(--accent); border-color: var(--accent); color: #08101f; font-weight: 600; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
 .btn.primary:hover { filter: brightness(1.08); }
 .btn.danger { color: var(--danger); }
 .btn.danger:hover { border-color: rgba(255,107,107,.5); }
@@ -155,6 +175,10 @@ tbody tr:hover { background: var(--panel); }
 
 /* ---------- modal ---------- */
 .modal { position: fixed; inset: 0; z-index: 40; display: grid; place-items: center; padding: 24px; }
+/* An author `display` beats the UA's [hidden]{display:none}, so the hidden
+   attribute needs its own rule — otherwise the backdrop dims the whole page
+   from first paint. */
+.modal[hidden] { display: none; }
 .modal-backdrop { position: absolute; inset: 0; background: rgba(4, 6, 9, 0.68); }
 .modal-card {
   position: relative; background: var(--panel); border: 1px solid var(--border); border-radius: 14px;

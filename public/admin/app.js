@@ -643,6 +643,20 @@ document.addEventListener('click', async (event) => {
   }
 });
 
+function currentTheme() {
+  return document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
+}
+
+function setTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  try { localStorage.setItem('assets-theme', theme); } catch (e) { /* private mode */ }
+  $('#theme-toggle').textContent = theme === 'light' ? '深色模式' : '浅色模式';
+}
+
+$('#theme-toggle').addEventListener('click', () => {
+  setTheme(currentTheme() === 'light' ? 'dark' : 'light');
+});
+
 $('#nav').addEventListener('click', (event) => {
   const item = event.target.closest('.nav-item');
   if (!item) return;
@@ -655,6 +669,7 @@ document.addEventListener('keydown', (event) => {
 });
 
 async function boot() {
+  setTheme(currentTheme());
   try {
     state.me = await api('/admin/api/me');
     $('#who').textContent = state.me.email ?? state.me.service_token ?? state.me.actor;
