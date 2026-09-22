@@ -13,6 +13,11 @@ const state = {
   assets: [],
   total: 0,
   filters: { q: '', status: 'live', kind: '', tag: '', limit: 48, offset: 0 },
+  layout: (() => {
+    try { return localStorage.getItem('assets-layout') === 'list' ? 'list' : 'grid'; }
+    catch { return 'grid'; }
+  })(),
+  selected: new Set(),
   tags: [],
   keys: [],
   abuse: [],
@@ -129,6 +134,42 @@ function formatTagsInput(tags) {
   return Array.isArray(tags) ? tags.join(', ') : '';
 }
 
+function setLayout(layout) {
+  state.layout = layout === 'list' ? 'list' : 'grid';
+  try { localStorage.setItem('assets-layout', state.layout); } catch { /* private mode */ }
+}
+
+function isSelected(hash) {
+  return state.selected.has(hash);
+}
+
+function setSelected(hash, on) {
+  if (on) state.selected.add(hash);
+  else state.selected.delete(hash);
+}
+
+function clearSelection() {
+  state.selected.clear();
+}
+
+function selectedAssets() {
+  return state.assets.filter((asset) => state.selected.has(asset.hash));
+}
+
+function pruneSelection() {
+  const visible = new Set(state.assets.map((asset) => asset.hash));
+  for (const hash of [...state.selected]) {
+    if (!visible.has(hash)) state.selected.delete(hash);
+  }
+}
+
+function thumbHtml(asset, sizeClass = '') {
+  if (asset.kind === 'image' && asset.status === 'live') {
+    return `<img loading="lazy" src="${esc(asset.url)}" alt="" />`;
+  }
+  return `<span class="glyph ${sizeClass}">${esc(asset.kind)}</span>`;
+}
+
 // ---------------------------------------------------------------- rendering
 
 function setTitle(title, tools = '') {
@@ -198,7 +239,12 @@ async function loadAssets() {
 
 async function renderAssets() {
   const tagFilter = state.filters.tag;
+  const layout = state.layout;
   setTitle('资产', `
+    <div class="layout-toggle" role="group" aria-label="视图">
+      <button type="button" class="btn small${layout === 'grid' ? ' active' : ''}" id="layout-grid">网格</button>
+      <button type="button" class="btn small${layout === 'list' ? ' active' : ''}" id="layout-list">列表</button>
+    </div>
     <input type="search" id="q" placeholder="搜索 hash / 文件名 / 标签" value="${esc(state.filters.q)}" />
     <select id="status">
       ${['live', 'expired', 'deleted', 'all'].map((value) =>
@@ -215,15 +261,68 @@ async function renderAssets() {
   view.innerHTML = `<div class="loading">加载中…</div>`;
 
   await Promise.all([loadStats(), loadAssets(), loadTags()]);
+  pruneSelection();
   const stats = state.stats;
   renderTagNav();
 
+  const batchBar = `
+    <div class="batch-bar${state.selected.size ? '' : ' is-empty'}" id="batch-bar">
+      <span class="batch-count">已选 <strong id="batch-count">${state.selected.size}</strong></span>
+      <label class="field batch-field"><span>标签</span>
+        <input type="text" id="batch-tags" placeholder="逗号分隔" list="batch-tag-suggestions" />
+      </label>
+      <select id="batch-tags-mode" title="标签写入方式">
+        <option value="replace">替换</option>
+        <option value="add">追加</option>
+        <option value="remove">移除</option>
+      </select>
+      <button class="btn" id="batch-tags-save" ${state.selected.size ? '' : 'disabled'}>改标签</button>
+      <label class="field batch-field"><span>过期</span>
+        <select id="batch-expire">
+          <option value="">选择…</option>
+          <option value="1h">1 小时</option>
+          <option value="1d">1 天</option>
+          <option value="7d">7 天</option>
+          <option value="30d">30 天</option>
+          <option value="never">永不过期</option>
+        </select>
+      </label>
+      <button class="btn" id="batch-expire-save" ${state.selected.size ? '' : 'disabled'}>改过期</button>
+      <button class="btn" id="batch-rotate" ${state.selected.size ? '' : 'disabled'}>换 hash</button>
+      <button class="btn" id="batch-copy" ${state.selected.size ? '' : 'disabled'}>复制 URL</button>
+      <button class="btn ghost" id="batch-clear" ${state.selected.size ? '' : 'disabled'}>取消选择</button>
+      <datalist id="batch-tag-suggestions">${state.tags.map((row) => `<option value="${esc(row.tag)}"></option>`).join('')}</datalist>
+    </div>
+  `;
+
+  const list = layout === 'list' ? renderAssetList(tagFilter) : renderAssetGrid(tagFilter);
+
+  view.innerHTML = `
+    <div class="stat-grid">
+      <div class="stat"><b>${stats.assets.live}</b><span>有效资产</span></div>
+      <div class="stat"><b>${fmtSize(stats.assets.live_bytes)}</b><span>占用空间</span></div>
+      <div class="stat"><b>${stats.assets.expired}</b><span>已过期</span></div>
+      <div class="stat"><b>${stats.assets.downloads}</b><span>累计下载</span></div>
+      <div class="stat"><b>${stats.blocked_sources}</b><span>封禁来源</span></div>
+    </div>
+    ${tagFilter ? `<div class="filter-banner">正在筛选标签 <strong>${esc(tagFilter)}</strong> <button class="btn ghost small" data-action="filter-tag" data-tag="">清除</button></div>` : ''}
+    ${batchBar}
+    ${list}
+    <p class="muted small assets-footer">共 ${state.total} 条 · 显示 ${state.assets.length} 条</p>
+  `;
+
+  wireAssetChrome();
+}
+
+function renderAssetGrid(tagFilter) {
+  if (state.assets.length === 0) return '<div class="empty">没有匹配的资产</div>';
   const cards = state.assets.map((asset) => `
-    <article class="card" data-hash="${esc(asset.hash)}">
+    <article class="card${isSelected(asset.hash) ? ' is-selected' : ''}" data-hash="${esc(asset.hash)}">
+      <label class="select-box" title="选择">
+        <input type="checkbox" data-action="toggle-select" data-hash="${esc(asset.hash)}" ${isSelected(asset.hash) ? 'checked' : ''} />
+      </label>
       <div class="thumb" data-action="open" data-hash="${esc(asset.hash)}">
-        ${asset.kind === 'image' && asset.status === 'live'
-          ? `<img loading="lazy" src="${esc(asset.url)}" alt="${esc(asset.filename)}" />`
-          : `<span class="glyph">${esc(asset.kind)}</span>`}
+        ${thumbHtml(asset)}
       </div>
       <div class="card-body">
         <div class="card-title">
@@ -246,20 +345,83 @@ async function renderAssets() {
       </div>
     </article>
   `).join('');
+  return `<div class="asset-grid">${cards}</div>`;
+}
 
-  view.innerHTML = `
-    <div class="stat-grid">
-      <div class="stat"><b>${stats.assets.live}</b><span>有效资产</span></div>
-      <div class="stat"><b>${fmtSize(stats.assets.live_bytes)}</b><span>占用空间</span></div>
-      <div class="stat"><b>${stats.assets.expired}</b><span>已过期</span></div>
-      <div class="stat"><b>${stats.assets.downloads}</b><span>累计下载</span></div>
-      <div class="stat"><b>${stats.blocked_sources}</b><span>封禁来源</span></div>
+function renderAssetList(tagFilter) {
+  if (state.assets.length === 0) return '<div class="empty">没有匹配的资产</div>';
+  const allSelected = state.assets.length > 0 && state.assets.every((asset) => isSelected(asset.hash));
+  const rows = state.assets.map((asset) => `
+    <tr class="${isSelected(asset.hash) ? 'is-selected' : ''}" data-hash="${esc(asset.hash)}">
+      <td class="col-check">
+        <input type="checkbox" data-action="toggle-select" data-hash="${esc(asset.hash)}" ${isSelected(asset.hash) ? 'checked' : ''} />
+      </td>
+      <td class="col-thumb">
+        <button type="button" class="list-thumb" data-action="open" data-hash="${esc(asset.hash)}" title="${esc(asset.filename)}">
+          ${thumbHtml(asset, 'glyph-sm')}
+        </button>
+      </td>
+      <td class="col-name">
+        <button type="button" class="linkish" data-action="open" data-hash="${esc(asset.hash)}" title="${esc(asset.filename)}">${esc(asset.filename)}</button>
+        <div class="hash" data-action="copy" data-copy="${esc(asset.url)}" title="${esc(asset.url)}">${esc(asset.hash)}</div>
+      </td>
+      <td class="col-tags">${asset.tags?.length ? tagPills(asset.tags, { clickable: true, active: tagFilter }) : '<span class="muted">—</span>'}</td>
+      <td class="col-meta"><span>${fmtSize(asset.size)}</span><span class="muted">${esc(asset.kind)}</span></td>
+      <td class="col-expiry">${asset.expires_at ? fmtTtl(asset.expires_at) : '永不过期'}</td>
+      <td class="col-status">${statusPill(asset)}</td>
+      <td class="col-actions">
+        <button class="btn small" data-action="copy" data-copy="${esc(asset.url)}">复制</button>
+        <a class="btn small" href="${esc(asset.url)}" target="_blank" rel="noreferrer">打开</a>
+      </td>
+    </tr>
+  `).join('');
+  return `
+    <div class="asset-table-wrap">
+      <table class="asset-table">
+        <thead>
+          <tr>
+            <th class="col-check"><input type="checkbox" id="select-all" ${allSelected ? 'checked' : ''} title="全选当前页" /></th>
+            <th class="col-thumb">预览</th>
+            <th class="col-name">文件</th>
+            <th class="col-tags">标签</th>
+            <th class="col-meta">大小</th>
+            <th class="col-expiry">过期</th>
+            <th class="col-status">状态</th>
+            <th class="col-actions"></th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
     </div>
-    ${tagFilter ? `<div class="filter-banner">正在筛选标签 <strong>${esc(tagFilter)}</strong> <button class="btn ghost small" data-action="filter-tag" data-tag="">清除</button></div>` : ''}
-    ${cards ? `<div class="asset-grid">${cards}</div>` : '<div class="empty">没有匹配的资产</div>'}
-    <p class="muted small" style="margin-top:16px">共 ${state.total} 条 · 显示 ${state.assets.length} 条</p>
   `;
+}
 
+function syncBatchBar() {
+  const count = state.selected.size;
+  const bar = $('#batch-bar');
+  if (!bar) return;
+  bar.classList.toggle('is-empty', count === 0);
+  const countNode = $('#batch-count');
+  if (countNode) countNode.textContent = String(count);
+  ['batch-tags-save', 'batch-expire-save', 'batch-rotate', 'batch-copy', 'batch-clear'].forEach((id) => {
+    const node = $(`#${id}`);
+    if (node) node.disabled = count === 0;
+  });
+  document.querySelectorAll('.card, .asset-table tbody tr').forEach((node) => {
+    const hash = node.dataset.hash;
+    if (!hash) return;
+    node.classList.toggle('is-selected', isSelected(hash));
+  });
+  document.querySelectorAll('[data-action="toggle-select"]').forEach((node) => {
+    node.checked = isSelected(node.dataset.hash);
+  });
+  const selectAll = $('#select-all');
+  if (selectAll) {
+    selectAll.checked = state.assets.length > 0 && state.assets.every((asset) => isSelected(asset.hash));
+  }
+}
+
+function wireAssetChrome() {
   $('#q').addEventListener('change', (event) => {
     state.filters.q = event.target.value.trim();
     state.filters.offset = 0;
@@ -276,6 +438,60 @@ async function renderAssets() {
     renderAssets().catch(showError);
   });
   $('#refresh').addEventListener('click', () => renderAssets().catch(showError));
+  $('#layout-grid')?.addEventListener('click', () => {
+    if (state.layout === 'grid') return;
+    setLayout('grid');
+    renderAssets().catch(showError);
+  });
+  $('#layout-list')?.addEventListener('click', () => {
+    if (state.layout === 'list') return;
+    setLayout('list');
+    renderAssets().catch(showError);
+  });
+  $('#select-all')?.addEventListener('change', (event) => {
+    const on = event.target.checked;
+    for (const asset of state.assets) setSelected(asset.hash, on);
+    syncBatchBar();
+  });
+  $('#batch-clear')?.addEventListener('click', () => {
+    clearSelection();
+    syncBatchBar();
+  });
+  $('#batch-copy')?.addEventListener('click', async () => {
+    const urls = selectedAssets().map((asset) => asset.url);
+    if (urls.length === 0) return;
+    await copy(urls.join('\n'));
+    toast(`已复制 ${urls.length} 条 URL`, 'ok');
+  });
+  $('#batch-tags-save')?.addEventListener('click', () => runBatchUpdate({
+    tags: $('#batch-tags').value,
+    tags_mode: $('#batch-tags-mode').value,
+  }).catch(showError));
+  $('#batch-expire-save')?.addEventListener('click', () => {
+    const value = $('#batch-expire').value;
+    if (!value) return toast('请选择过期时间', 'error');
+    const body = value === 'never' ? { never: true } : { expires_in: value };
+    runBatchUpdate(body).catch(showError);
+  });
+  $('#batch-rotate')?.addEventListener('click', async () => {
+    if (!confirm(`将为选中的 ${state.selected.size} 个资产生成新 hash，旧链接立即失效。继续？`)) return;
+    await runBatchUpdate({ rotate: true }).catch(showError);
+  });
+}
+
+async function runBatchUpdate(patch) {
+  const hashes = [...state.selected];
+  if (hashes.length === 0) return;
+  const data = await api('/admin/api/assets/batch', {
+    method: 'POST',
+    body: { hashes, ...patch },
+  });
+  clearSelection();
+  if (data.results) {
+    for (const row of data.results) state.selected.delete(row.previous_hash);
+  }
+  toast(`已更新 ${data.updated} 项${data.missing?.length ? `，${data.missing.length} 项未找到` : ''}`, 'ok');
+  await Promise.all([loadTags(), renderAssets()]);
 }
 
 function uploadRow(item) {
@@ -296,9 +512,9 @@ function renderUpload() {
   loadTags().catch(() => undefined);
   view.innerHTML = `
     <div class="panel">
-      <div class="dropzone" id="dropzone">
-        <strong>拖拽文件到这里，或点击选择</strong>
-        <span class="muted small">默认过期时间 ${state.stats?.policy?.default_ttl_days ?? 7} 天 · 单文件上限 ${fmtSize(state.stats?.policy?.max_upload_bytes ?? 0)}</span>
+      <div class="dropzone" id="dropzone" tabindex="0">
+        <strong>拖拽文件到这里，点击选择，或直接粘贴图片</strong>
+        <span class="muted small">默认过期时间 ${state.stats?.policy?.default_ttl_days ?? 7} 天 · 单文件上限 ${fmtSize(state.stats?.policy?.max_upload_bytes ?? 0)} · Ctrl/⌘+V 粘贴截图</span>
       </div>
       <input type="file" id="file" multiple hidden />
       <div class="row-form" style="margin-top:14px">
@@ -323,13 +539,46 @@ function renderUpload() {
   const dropzone = $('#dropzone');
   const fileInput = $('#file');
   dropzone.addEventListener('click', () => fileInput.click());
-  fileInput.addEventListener('change', () => queueUploads([...fileInput.files]));
+  fileInput.addEventListener('change', () => {
+    queueUploads([...fileInput.files]);
+    fileInput.value = '';
+  });
   ['dragenter', 'dragover'].forEach((type) =>
     dropzone.addEventListener(type, (event) => { event.preventDefault(); dropzone.classList.add('hot'); }));
   ['dragleave', 'drop'].forEach((type) =>
     dropzone.addEventListener(type, (event) => { event.preventDefault(); dropzone.classList.remove('hot'); }));
   dropzone.addEventListener('drop', (event) => queueUploads([...event.dataTransfer.files]));
 }
+
+function filesFromClipboard(clipboardData) {
+  if (!clipboardData) return [];
+  const files = [];
+  const items = clipboardData.items ? [...clipboardData.items] : [];
+  for (const item of items) {
+    if (item.kind !== 'file' || !item.type.startsWith('image/')) continue;
+    const blob = item.getAsFile();
+    if (!blob) continue;
+    const ext = (blob.type.split('/')[1] || 'png').replace('jpeg', 'jpg');
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    files.push(new File([blob], `paste-${stamp}.${ext}`, { type: blob.type || 'image/png' }));
+  }
+  if (files.length === 0 && clipboardData.files?.length) {
+    for (const file of clipboardData.files) {
+      if (file.type.startsWith('image/')) files.push(file);
+    }
+  }
+  return files;
+}
+
+document.addEventListener('paste', (event) => {
+  if (state.view !== 'upload') return;
+  const files = filesFromClipboard(event.clipboardData);
+  if (files.length === 0) return;
+  event.preventDefault();
+  $('#dropzone')?.classList.add('hot');
+  setTimeout(() => $('#dropzone')?.classList.remove('hot'), 400);
+  runUploads(files).catch(showError);
+});
 
 async function queueUploads(files) {
   for (const file of files) {
@@ -703,6 +952,11 @@ document.addEventListener('click', async (event) => {
     const action = target.dataset.action;
     if (action === 'copy') return copy(target.dataset.copy);
     if (action === 'open') return openAsset(target.dataset.hash);
+    if (action === 'toggle-select') {
+      setSelected(target.dataset.hash, target.checked);
+      syncBatchBar();
+      return;
+    }
     if (action === 'filter-tag') {
       modal.hidden = true;
       selectTag(target.dataset.tag ?? '');

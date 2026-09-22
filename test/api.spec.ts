@@ -63,6 +63,10 @@ beforeEach(async () => {
   await clearGuard('192.0.2.30');
   await clearGuard('203.0.113.9');
   await clearGuard('198.51.100.7');
+  await clearGuard('198.18.0.50');
+  // Requests without cf-connecting-ip land on the LOCAL_SOURCE bucket.
+  await clearGuard('127.0.0.1');
+  await clearGuard('local');
 });
 
 describe('upload and delivery', () => {
@@ -238,6 +242,48 @@ describe('upload and delivery', () => {
       body: JSON.stringify({ tags: '' }),
     });
     expect(((await cleared.json()) as { asset: { tags: string[] } }).asset.tags).toEqual([]);
+  });
+
+  it('batch-updates tags and expiry, and rotates hashes', async () => {
+    const first = (await (await upload('batch-one', { key, query: 'tags=旧标签' })).json()) as { hash: string };
+    const second = (await (await upload('batch-two', { key })).json()) as { hash: string };
+    const token = await signAccessJwt({ email: TEST_EMAIL });
+    const auth = { 'cf-access-jwt-assertion': token, 'content-type': 'application/json' };
+
+    const updated = await SELF.fetch(`${BASE}/admin/api/assets/batch`, {
+      method: 'POST',
+      headers: auth,
+      body: JSON.stringify({
+        hashes: [first.hash, second.hash],
+        tags: '批量,共享',
+        tags_mode: 'replace',
+        expires_in: '1d',
+      }),
+    });
+    expect(updated.status).toBe(200);
+    const updatedBody = (await updated.json()) as {
+      updated: number;
+      results: { hash: string; tags: string[]; expires_at: number }[];
+    };
+    expect(updatedBody.updated).toBe(2);
+    expect(updatedBody.results.every((row) => row.tags.includes('批量'))).toBe(true);
+
+    const rotated = await SELF.fetch(`${BASE}/admin/api/assets/batch`, {
+      method: 'POST',
+      headers: auth,
+      body: JSON.stringify({ hashes: [first.hash, second.hash], rotate: true }),
+    });
+    expect(rotated.status).toBe(200);
+    const rotatedBody = (await rotated.json()) as {
+      results: { hash: string; previous_hash: string }[];
+    };
+    expect(rotatedBody.results).toHaveLength(2);
+    const probe = { 'cf-connecting-ip': '198.18.0.50' };
+    for (const row of rotatedBody.results) {
+      expect(row.hash).not.toBe(row.previous_hash);
+      expect((await SELF.fetch(`${BASE}/${row.previous_hash}/x.txt`, { headers: probe })).status).toBe(404);
+      expect((await SELF.fetch(`${BASE}/${row.hash}/x.txt`, { headers: probe })).status).toBe(200);
+    }
   });
 
   it('answers range requests and HEAD without touching the body', async () => {

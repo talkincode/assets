@@ -69,7 +69,7 @@ curl -X POST "https://assets.talkincode.net/api/upload?expires_in=7d&filename=de
 | GET | `/me` | 当前身份与外链前缀 |
 | GET | `/stats` | 总量、占用、按类型分布、封禁数、密钥数 |
 | GET | `/assets` | 列表：`status=live\|expired\|deleted\|all`、`kind`、`tag`、`q`、`limit`、`offset` |
-| POST | `/assets` | 上传（dashboard 登录态，无需上传密钥） |
+| POST | `/assets/batch` | 批量：`{hashes, tags?, tags_mode?, expires_in?/never?, rotate?}`，最多 50 个 |
 | GET | `/assets/:hash` | 详情 + 该资产的操作记录 |
 | PATCH | `/assets/:hash` | `{expires_in}` / `{expires_at}` / `{never:true}` / `{filename}` / `{note}` / `{tags}` |
 | POST | `/assets/:hash/rotate` | 换 hash：`{hash?}`，留空则随机；返回新链接与旧链接 |

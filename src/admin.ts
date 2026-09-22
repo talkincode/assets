@@ -8,6 +8,7 @@ import {
   HttpError,
   assetKind,
   clampInt,
+  decodeTags,
   errorResponse,
   hashProblem,
   jsonResponse,
@@ -222,6 +223,123 @@ router.get('/tags', async (ctx) => {
 router.post('/assets', (ctx) => {
   const identity = ctx.identity!;
   return handleUpload(ctx, { actor: identity.actor, keyId: null });
+});
+
+const MAX_BATCH = 50;
+
+/**
+ * Batch update tags / expiry, or rotate hashes. Copying URLs stays client-side.
+ * Registered before `/assets/:hash` so `batch` is never treated as a hash.
+ */
+router.post('/assets/batch', async (ctx) => {
+  const { env } = ctx;
+  const body = await readJson(ctx.request);
+  const hashesRaw = body.hashes;
+  if (!Array.isArray(hashesRaw) || hashesRaw.length === 0) {
+    throw new HttpError(400, 'invalid_request', 'hashes must be a non-empty array');
+  }
+  if (hashesRaw.length > MAX_BATCH) {
+    throw new HttpError(400, 'too_many', `at most ${MAX_BATCH} hashes per batch`);
+  }
+  const hashes = [...new Set(hashesRaw.map((value) => String(value)))];
+  const rotate = body.rotate === true;
+  const hasExpiry = 'expires_in' in body || 'expires_at' in body || body.never === true;
+  const hasTags = 'tags' in body;
+  if (!rotate && !hasExpiry && !hasTags) {
+    throw new HttpError(400, 'nothing_to_update', 'pass tags, expires_in/expires_at/never, and/or rotate');
+  }
+
+  const tagsMode = String(body.tags_mode ?? 'replace');
+  if (hasTags && !['replace', 'add', 'remove'].includes(tagsMode)) {
+    throw new HttpError(400, 'invalid_tags_mode', 'tags_mode must be replace|add|remove');
+  }
+  const incomingTags = hasTags ? normalizeTags(body.tags) : [];
+
+  let expiresAt: number | null | undefined;
+  if ('expires_in' in body) {
+    const seconds = parseDuration(body.expires_in as string);
+    expiresAt = seconds === null ? null : nowMs() + seconds * 1000;
+  } else if ('expires_at' in body) {
+    expiresAt = parseTimestamp(body.expires_at as string);
+  } else if (body.never === true) {
+    expiresAt = null;
+  }
+
+  const results: {
+    hash: string;
+    previous_hash?: string;
+    url: string;
+    tags: string[];
+    expires_at: number | null;
+  }[] = [];
+  const missing: string[] = [];
+
+  for (const hash of hashes) {
+    const asset = await first<AssetRow>(env, 'SELECT * FROM assets WHERE hash = ?', hash);
+    if (!asset) {
+      missing.push(hash);
+      continue;
+    }
+
+    let currentHash = asset.hash;
+    let currentFilename = asset.filename;
+    let currentTags = decodeTags(asset.tags);
+    let currentExpires = asset.expires_at;
+
+    if (hasTags) {
+      if (tagsMode === 'replace') currentTags = incomingTags;
+      else if (tagsMode === 'add') currentTags = normalizeTags([...currentTags, ...incomingTags]);
+      else currentTags = currentTags.filter((tag) => !incomingTags.includes(tag));
+      await run(env, 'UPDATE assets SET tags = ? WHERE hash = ?', serializeTags(currentTags), currentHash);
+    }
+
+    if (hasExpiry) {
+      currentExpires = expiresAt === undefined ? currentExpires : expiresAt;
+      await run(env, 'UPDATE assets SET expires_at = ? WHERE hash = ?', currentExpires, currentHash);
+    }
+
+    let previousHash: string | undefined;
+    if (rotate) {
+      const next = randomHash();
+      const clash = await first<{ hash: string }>(env, 'SELECT hash FROM assets WHERE hash = ?', next);
+      if (clash) throw new HttpError(500, 'internal_error', 'failed to allocate a free hash; retry');
+      await run(env, 'UPDATE assets SET hash = ? WHERE hash = ?', next, currentHash);
+      await purgeAsset(env, ctx.exec, currentHash, currentFilename);
+      previousHash = currentHash;
+      currentHash = next;
+    } else if (hasTags || hasExpiry) {
+      await purgeAsset(env, ctx.exec, currentHash, currentFilename);
+    }
+
+    await audit(env, {
+      actor: ctx.identity!.actor,
+      action: rotate ? 'batch:rotate' : 'batch:update',
+      target: currentHash,
+      ip: clientIp(ctx.request),
+      detail: JSON.stringify({
+        previous_hash: previousHash,
+        tags: hasTags ? currentTags : undefined,
+        tags_mode: hasTags ? tagsMode : undefined,
+        expires_at: hasExpiry ? currentExpires : undefined,
+      }).slice(0, 400),
+    });
+
+    const updated = await loadAssetOr404(env, currentHash);
+    const summary = assetSummary(env, updated);
+    results.push({
+      hash: summary.hash,
+      previous_hash: previousHash,
+      url: summary.url,
+      tags: summary.tags,
+      expires_at: summary.expires_at,
+    });
+  }
+
+  return jsonResponse({
+    updated: results.length,
+    missing,
+    results,
+  });
 });
 
 router.get('/assets/:hash', async (ctx) => {
