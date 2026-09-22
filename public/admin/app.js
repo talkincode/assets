@@ -437,7 +437,7 @@ async function renderSettings() {
     <div class="panel">
       <h2>部署环境</h2>
       <dl class="kv">
-        <dt>外链前缀</dt><dd class="mono">${esc(data.read_only.access_allowed_emails ? '' : '')}${esc(state.me?.public_base_url ?? '')}</dd>
+        <dt>外链前缀</dt><dd class="mono">${esc(state.me?.public_base_url ?? '')}</dd>
         <dt>Access 状态</dt><dd>${data.read_only.access_configured ? `<span class="pill live">已配置</span>` : `<span class="pill deleted">未配置</span>`}</dd>
         <dt>允许登录</dt><dd class="mono">${esc(data.read_only.access_allowed_emails)}</dd>
         <dt>缓存 TTL</dt><dd>${esc(data.read_only.cache_ttl_seconds)} 秒（删除/过期传播上限）</dd>

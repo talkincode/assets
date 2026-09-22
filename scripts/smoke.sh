@@ -40,8 +40,11 @@ created="$(curl -sS -X POST "$BASE/api/upload?expires_in=1h&filename=smoke.txt" 
   -H "Authorization: Bearer $ASSETS_KEY" \
   -H "Content-Type: text/plain" \
   --data-binary "@$tmp/smoke.txt")"
-url="$(printf '%s' "$created" | python3 -c 'import json,sys; print(json.load(sys.stdin)["url"])')"
-hash="$(printf '%s' "$created" | python3 -c 'import json,sys; print(json.load(sys.stdin)["hash"])')"
+if ! url="$(printf '%s' "$created" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("url",""))')"; then
+  fail "upload rejected: $created"
+fi
+hash="$(printf '%s' "$created" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("hash",""))')"
+[[ -n "$url" ]] || fail "upload rejected: $created"
 [[ "$url" == "$BASE/"* ]] || fail "upload returned an unexpected url: $url"
 pass "upload -> $url"
 

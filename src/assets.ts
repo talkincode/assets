@@ -99,8 +99,10 @@ export async function handleAssetRequest(ctx: Ctx): Promise<Response> {
 
   const hash = ctx.params.hash;
 
-  // Reserved words and malformed hashes are ordinary 404s: counting them would
-  // let any visitor with a broken link get their own network blocked.
+  // Reserved service paths (favicon, robots, admin…) answer quietly: a browser
+  // asking for one is not an attack. Everything else that is not a valid hash
+  // is somebody guessing, and guessing is what the guard counts. In the first
+  // hours after deployment this caught two scanners probing /.env.prod.
   const problem = hashProblem(hash);
   if (problem) {
     if (RESERVED_SEGMENTS.has(hash.toLowerCase())) return notFound();
@@ -116,14 +118,17 @@ export async function handleAssetRequest(ctx: Ctx): Promise<Response> {
     if (verdict.blocked) return blockedResponse(verdict.retryAfter);
     return notFound();
   }
-  if (asset.purged_at !== null) return notFound();
-  if (asset.deleted_at !== null) return notFound();
+  // Expiry is answered before the sweep gets to it, and keeps answering 410
+  // afterwards, so the status a client sees does not depend on when
+  // housekeeping happened to run.
   if (asset.expires_at !== null && asset.expires_at <= now) {
     return new Response('this asset has expired\n', {
       status: 410,
       headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' },
     });
   }
+  if (asset.purged_at !== null) return notFound();
+  if (asset.deleted_at !== null) return notFound();
 
   const requested = sanitizeFilename(ctx.params.filename ?? asset.filename, asset.filename);
   const filename = requested || asset.filename;

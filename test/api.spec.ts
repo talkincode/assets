@@ -104,13 +104,20 @@ describe('upload and delivery', () => {
     expect((await upload('nope', { key: 'ak_wrong' })).status).toBe(401);
   });
 
-  it('honours expires_in, and stops serving once it lapses', async () => {
+  it('honours expires_in, and reports 410 both before and after the sweep', async () => {
     const created = await upload('short lived', { key, query: 'expires_in=1s' });
     const { hash } = (await created.json()) as { hash: string };
     expect((await SELF.fetch(`${BASE}/${hash}/s.txt`)).status).toBe(200);
+
     await env.DB.prepare('UPDATE assets SET expires_at = ? WHERE hash = ?').bind(Date.now() - 1000, hash).run();
-    const after = await SELF.fetch(`${BASE}/${hash}/s.txt`);
-    expect(after.status).toBe(410);
+    expect((await SELF.fetch(`${BASE}/${hash}/s.txt`)).status).toBe(410);
+
+    // The hourly sweep tombstones it and drops the bytes; the answer must not
+    // change just because housekeeping ran.
+    await env.DB.prepare('UPDATE assets SET deleted_at = ?, delete_reason = ?, purged_at = ? WHERE hash = ?')
+      .bind(Date.now(), 'expired', Date.now(), hash)
+      .run();
+    expect((await SELF.fetch(`${BASE}/${hash}/s.txt`)).status).toBe(410);
   });
 
   it('supports never-expiring uploads and custom hashes', async () => {

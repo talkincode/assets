@@ -24,5 +24,8 @@ export default defineConfig({
   ],
   test: {
     setupFiles: ['./test/setup.ts'],
+    // Nested checkouts (agent worktrees, vendored copies) must not be picked up:
+    // two suites in one miniflare share D1 and would fight over settings.
+    exclude: ['**/node_modules/**', '**/dist/**', '**/.delta/**'],
   },
 });
