@@ -681,6 +681,94 @@ export async function writeTextContent(ctx: ServiceCtx, args: WriteTextArgs) {
 // OAuth token). Large files never pass through MCP JSON.
 // ---------------------------------------------------------------------------
 
+/** Cap for single-call base64 uploads: MCP JSON is not a bulk transport. */
+export const DIRECT_UPLOAD_MAX_BYTES = 10 * 1024 * 1024;
+
+/** Bytes already in R2, waiting for their asset + first-link rows. */
+export interface StoredUpload {
+  objectKey: string;
+  assetHash: string;
+  linkHash: string;
+  filename: string;
+  contentType: string;
+  size: number;
+  etag: string | null;
+  note: string | null;
+  tagsJson: string | null;
+  projectId: string | null;
+  linkExpiresAt: number | null;
+  uploaderIp: string | null;
+  uploaderAgent: string | null;
+  /** Where the bytes came from, for the audit line. */
+  via: string;
+  /** Extra bookkeeping after the rows land (e.g. mark a session completed). */
+  afterInsert?: (env: Env, now: number) => Promise<void>;
+}
+
+/**
+ * Insert the asset + first-link rows for R2 bytes, audit, and describe the
+ * result. Shared by session completion and direct uploads so both paths
+ * mint identical records. Cleans up R2 + rows when the insert fails.
+ */
+export async function recordStoredUpload(ctx: ServiceCtx, stored: StoredUpload, now = nowMs()) {
+  const { env } = ctx;
+  try {
+    const project = stored.projectId ? projectRef(await getProject(env, stored.projectId)) : null;
+    await run(
+      env,
+      `INSERT INTO assets (hash, object_key, filename, content_type, size, etag, note, tags, project_id, key_id,
+                             uploader_ip, uploader_agent, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)`,
+      stored.assetHash,
+      stored.objectKey,
+      stored.filename,
+      stored.contentType,
+      stored.size,
+      stored.etag,
+      stored.note,
+      stored.tagsJson,
+      stored.projectId,
+      stored.uploaderIp,
+      stored.uploaderAgent,
+      now,
+    );
+    const link = await insertLink(env, {
+      assetHash: stored.assetHash,
+      expiresAt: stored.linkExpiresAt,
+      createdBy: ctx.actor,
+      requestedHash: stored.linkHash,
+      now,
+    });
+    await stored.afterInsert?.(env, now);
+    await audit(env, {
+      actor: ctx.actor,
+      action: 'upload',
+      target: stored.assetHash,
+      ip: ctx.ip,
+      detail: `${stored.filename} (${stored.size} bytes) link=${link.hash} ${stored.via}`,
+    });
+    return {
+      hash: link.hash,
+      asset_hash: stored.assetHash,
+      link_hash: link.hash,
+      filename: stored.filename,
+      size: stored.size,
+      content_type: stored.contentType,
+      tags: decodeTags(stored.tagsJson),
+      project,
+      note: stored.note,
+      created_at: now,
+      expires_at: stored.linkExpiresAt,
+      url: linkUrl(env, link.hash, stored.filename),
+    };
+  } catch (error) {
+    await env.BUCKET.delete(stored.objectKey).catch(() => undefined);
+    await run(env, 'DELETE FROM assets WHERE hash = ?', stored.assetHash).catch(() => undefined);
+    await run(env, 'DELETE FROM links WHERE hash = ?', stored.linkHash).catch(() => undefined);
+    throw error;
+  }
+}
+
 export interface UploadSessionRow {
   id: string;
   upload_key: string | null;
@@ -774,6 +862,88 @@ export async function createUploadSession(ctx: ServiceCtx, args: CreateSessionAr
     max_bytes: maxBytes,
     expires_at: expiresAt,
   };
+}
+
+export interface DirectUploadArgs {
+  filename: string;
+  /** Standard base64 (not url-safe); decoded size must fit the direct cap. */
+  content: string;
+  content_type?: string;
+  note?: string;
+  tags?: string | string[];
+  project?: string;
+}
+
+/**
+ * One-call upload for small files (≤10 MiB): base64 in, asset + first link
+ * out. Anything bigger belongs in an upload session — MCP JSON is not a
+ * bulk transport, and large tool payloads time out through portals.
+ */
+export async function uploadFileDirect(ctx: ServiceCtx, args: DirectUploadArgs, now = nowMs()) {
+  const { env } = ctx;
+  const rawName = String(args.filename ?? '').trim();
+  if (!rawName) throw new HttpError(400, 'invalid_filename', 'filename is required');
+  const filename = sanitizeFilename(rawName);
+  const contentType = guessContentType(filename, args.content_type ?? null);
+  const raw = String(args.content ?? '').replace(/\s+/g, '');
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(raw) || raw.length % 4 !== 0) {
+    throw new HttpError(400, 'invalid_content', 'content must be standard base64');
+  }
+  let bytes: Uint8Array;
+  try {
+    const binary = atob(raw);
+    bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  } catch {
+    throw new HttpError(400, 'invalid_content', 'content must be standard base64');
+  }
+  if (bytes.byteLength === 0) throw new HttpError(400, 'empty_body', 'refusing to store an empty object');
+  const cap = Math.min(
+    DIRECT_UPLOAD_MAX_BYTES,
+    await getNumberSetting(env, 'max_upload_bytes', Number(env.MAX_UPLOAD_BYTES) || 104_857_600),
+  );
+  if (bytes.byteLength > cap) {
+    throw new HttpError(
+      413,
+      'direct_upload_too_large',
+      `direct uploads are limited to ${cap} bytes; use create_upload_session for bigger files`,
+    );
+  }
+  const projectAssign = await resolveProjectAssignment(
+    env,
+    args.project === undefined ? {} : { project: args.project },
+  );
+  const linkExpiresAt = await resolveLinkExpiry(env, undefined, now);
+  const assetHash = randomHash();
+  const linkHash = randomHash();
+  const objectKey = `objects/${randomHash(26)}`;
+  const object = await env.BUCKET.put(objectKey, bytes, {
+    httpMetadata: { contentType },
+    customMetadata: { hash: assetHash, filename },
+  }).catch((error) => {
+    console.error('direct upload failed', error);
+    throw new HttpError(400, 'upload_failed', 'upload failed');
+  });
+  return recordStoredUpload(
+    ctx,
+    {
+      objectKey,
+      assetHash,
+      linkHash,
+      filename,
+      contentType,
+      size: object?.size ?? bytes.byteLength,
+      etag: object?.etag ?? null,
+      note: args.note === undefined ? null : String(args.note).slice(0, 500),
+      tagsJson: serializeTags(args.tags === undefined ? [] : normalizeTags(args.tags)),
+      projectId: projectAssign.projectId,
+      linkExpiresAt,
+      uploaderIp: ctx.ip,
+      uploaderAgent: 'mcp:upload_file',
+      via: 'via mcp upload_file',
+    },
+    now,
+  );
 }
 
 /**
@@ -875,69 +1045,37 @@ export async function completeUploadSession(
   }
 
   try {
-    const project = session.project_id
-      ? projectRef(await getProject(env, session.project_id))
-      : null;
-    await run(
-      env,
-      `INSERT INTO assets (hash, object_key, filename, content_type, size, etag, note, tags, project_id, key_id,
-                             uploader_ip, uploader_agent, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)`,
-      assetHash,
-      objectKey,
-      session.filename,
-      session.content_type,
-      size,
-      etag,
-      session.note,
-      session.tags,
-      session.project_id,
-      clientIp(request),
-      request.headers.get('user-agent'),
-      now,
-    );
-    const link = await insertLink(env, {
-      assetHash,
-      expiresAt: session.link_expires_at,
-      createdBy: ctx.actor,
-      requestedHash: linkHash,
-      now,
-    });
-    await run(
-      env,
-      'UPDATE upload_sessions SET completed_at = ?, asset_hash = ? WHERE id = ?',
-      now,
-      assetHash,
-      session.id,
-    );
-    await audit(env, {
-      actor: ctx.actor,
-      action: 'upload',
-      target: assetHash,
-      ip: clientIp(request),
-      detail: `${session.filename} (${size} bytes) link=${link.hash} via upload session`,
-    });
-    return jsonResponse(
+    const body = await recordStoredUpload(
+      { ...ctx, ip: clientIp(request) },
       {
-        hash: link.hash,
-        asset_hash: assetHash,
-        link_hash: link.hash,
+        objectKey,
+        assetHash,
+        linkHash,
         filename: session.filename,
+        contentType: session.content_type,
         size,
-        content_type: session.content_type,
-        tags: decodeTags(session.tags),
-        project,
+        etag,
         note: session.note,
-        created_at: now,
-        expires_at: session.link_expires_at,
-        url: linkUrl(env, link.hash, session.filename),
+        tagsJson: session.tags,
+        projectId: session.project_id,
+        linkExpiresAt: session.link_expires_at,
+        uploaderIp: clientIp(request),
+        uploaderAgent: request.headers.get('user-agent'),
+        via: 'via upload session',
+        afterInsert: async (db, at) => {
+          await run(
+            db,
+            'UPDATE upload_sessions SET completed_at = ?, asset_hash = ? WHERE id = ?',
+            at,
+            assetHash,
+            session.id,
+          );
+        },
       },
-      { status: 201 },
+      now,
     );
+    return jsonResponse(body, { status: 201 });
   } catch (error) {
-    await env.BUCKET.delete(objectKey).catch(() => undefined);
-    await run(env, 'DELETE FROM assets WHERE hash = ?', assetHash).catch(() => undefined);
-    await run(env, 'DELETE FROM links WHERE hash = ?', linkHash).catch(() => undefined);
     if (error instanceof HttpError) {
       return errorResponse(error.status, error.code, error.message);
     }
