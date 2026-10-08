@@ -13,7 +13,6 @@ import {
   clampInt,
   decodeTags,
   errorResponse,
-  guessContentType,
   isEditableTextAsset,
   isMarkdownAsset,
   jsonResponse,
@@ -24,7 +23,6 @@ import {
   parseTimestamp,
   randomHash,
   requireString,
-  sanitizeFilename,
   serializeTags,
   toErrorResponse,
 } from './util';
@@ -33,7 +31,6 @@ import {
   all,
   audit,
   first,
-  getNumberSetting,
   getProject,
   getProjectBySlug,
   projectRef,
@@ -46,19 +43,38 @@ import {
 } from './db';
 import { createUploadKey, accessConfigured, requireAccessIdentity } from './auth';
 import { handleUpload, uploadPolicy } from './upload';
-import { assetCacheUrls, purgeUrls } from './cache';
 import { clientIp, guardReset } from './abuse';
-import { summarizeAssetWithLinks, linkStatsForAssets } from './assets';
 import {
   insertLink,
   linkSummary,
   parseExpiryHint,
   resolveLinkExpiry,
-  resolveTempLinkExpiry,
   TEMP_LINK_MAX_SECONDS,
 } from './links';
+import {
+  createLink,
+  createProject,
+  createTempLink,
+  deleteAsset,
+  getAssetDetail,
+  listLinks,
+  listProjects,
+  listTags,
+  loadAssetOr404,
+  loadLinkOr404,
+  purgeLink,
+  purgeAssetLinks,
+  resolveProjectAssignment,
+  restoreAsset,
+  revokeLink,
+  searchAssets,
+  summarizeOne,
+  summarizeProject,
+  updateAsset,
+  writeTextContent,
+  type ServiceCtx,
+} from './service';
 
-const MAX_PAGE_SIZE = 200;
 const MAX_PROJECT_NAME_LENGTH = 80;
 
 async function readJson(request: Request): Promise<Record<string, unknown>> {
@@ -75,77 +91,12 @@ async function readJson(request: Request): Promise<Record<string, unknown>> {
   }
 }
 
-const KIND_FILTERS: Record<string, string> = {
-  image: "content_type LIKE 'image/%'",
-  audio: "content_type LIKE 'audio/%'",
-  video: "content_type LIKE 'video/%'",
-  text: "content_type LIKE 'text/%'",
-};
-
-async function loadAssetOr404(env: Env, hash: string): Promise<AssetRow> {
-  const asset = await first<AssetRow>(env, 'SELECT * FROM assets WHERE hash = ?', hash);
-  if (!asset) throw new HttpError(404, 'not_found', `no asset with hash ${hash}`);
-  return asset;
+function serviceCtx(ctx: Ctx): ServiceCtx {
+  return { env: ctx.env, exec: ctx.exec, actor: ctx.identity!.actor, ip: clientIp(ctx.request) };
 }
 
-async function loadLinkOr404(env: Env, hash: string): Promise<LinkRow> {
-  const link = await first<LinkRow>(env, 'SELECT * FROM links WHERE hash = ?', hash);
-  if (!link) throw new HttpError(404, 'not_found', `no link with hash ${hash}`);
-  return link;
-}
 
-/**
- * Resolve project assignment from body fields `project` / `project_id` / `project_slug`.
- * `null` / `""` / `"none"` / `"unassigned"` clears the assignment.
- */
-async function resolveProjectAssignment(
-  env: Env,
-  body: Record<string, unknown>,
-): Promise<{ touched: boolean; projectId: string | null }> {
-  if (!('project' in body) && !('project_id' in body) && !('project_slug' in body)) {
-    return { touched: false, projectId: null };
-  }
-  const raw =
-    'project' in body ? body.project
-    : 'project_slug' in body ? body.project_slug
-    : body.project_id;
-  if (raw === null || raw === '' || raw === 'none' || raw === 'unassigned') {
-    return { touched: true, projectId: null };
-  }
-  const text = String(raw).trim();
-  if (text === '') return { touched: true, projectId: null };
-  const byId = await getProject(env, text);
-  if (byId) return { touched: true, projectId: byId.id };
-  const slug = normalizeProjectSlug(text);
-  const bySlug = await getProjectBySlug(env, slug);
-  if (!bySlug) throw new HttpError(404, 'project_not_found', `no project "${slug}"`);
-  return { touched: true, projectId: bySlug.id };
-}
 
-/** List/upload filter: slug or id; `none`/`unassigned`/`-` → unassigned (NULL). */
-async function resolveProjectFilter(env: Env, raw: string): Promise<string | null | undefined> {
-  const text = raw.trim();
-  if (!text) return undefined;
-  if (text === 'none' || text === 'unassigned' || text === '-') return null;
-  const byId = await getProject(env, text);
-  if (byId) return byId.id;
-  const slug = normalizeProjectSlug(text);
-  const bySlug = await getProjectBySlug(env, slug);
-  if (!bySlug) throw new HttpError(404, 'project_not_found', `no project "${slug}"`);
-  return bySlug.id;
-}
-
-function summarizeProject(row: ProjectRow, count = 0) {
-  return {
-    id: row.id,
-    slug: row.slug,
-    name: row.name,
-    note: row.note,
-    created_at: row.created_at,
-    archived_at: row.archived_at,
-    asset_count: count,
-  };
-}
 
 async function findProject(env: Env, idOrSlug: string): Promise<ProjectRow | null> {
   const byId = await getProject(env, idOrSlug);
@@ -155,24 +106,6 @@ async function findProject(env: Env, idOrSlug: string): Promise<ProjectRow | nul
   } catch {
     return null;
   }
-}
-
-async function purgeLink(env: Env, exec: ExecutionContext, linkHash: string, filename: string): Promise<void> {
-  await purgeUrls(env, exec, assetCacheUrls(env, linkHash, filename));
-}
-
-async function purgeAssetLinks(env: Env, exec: ExecutionContext, assetHash: string, filename: string): Promise<void> {
-  const links = await all<{ hash: string }>(env, 'SELECT hash FROM links WHERE asset_hash = ?', assetHash);
-  const urls = links.flatMap((row) => assetCacheUrls(env, row.hash, filename));
-  if (urls.length > 0) await purgeUrls(env, exec, urls);
-}
-
-async function summarizeOne(env: Env, asset: AssetRow, now = nowMs()) {
-  const stats = await linkStatsForAssets(env, [asset.hash], now);
-  const project = asset.project_id
-    ? projectRef(await getProject(env, asset.project_id))
-    : null;
-  return summarizeAssetWithLinks(env, asset, stats.get(asset.hash)!, now, project);
 }
 
 const router = new Router();
@@ -270,207 +203,42 @@ router.get('/stats', async (ctx) => {
 
 router.get('/assets', async (ctx) => {
   const { env, url } = ctx;
-  const q = url.searchParams.get('q')?.trim() ?? '';
-  const status = url.searchParams.get('status') ?? 'live';
-  const kind = url.searchParams.get('kind') ?? '';
   const tag = url.searchParams.get('tag')?.trim() ?? '';
   const projectRaw = url.searchParams.get('project')?.trim()
     ?? url.searchParams.get('project_id')?.trim()
     ?? '';
-  const limit = clampInt(url.searchParams.get('limit'), 1, MAX_PAGE_SIZE, 50);
-  const offset = clampInt(url.searchParams.get('offset'), 0, 1_000_000, 0);
-  const now = nowMs();
-
-  const liveLinkSql = `EXISTS (
-    SELECT 1 FROM links
-    WHERE links.asset_hash = assets.hash
-      AND links.revoked_at IS NULL
-      AND (links.expires_at IS NULL OR links.expires_at > ?)
-  )`;
-
-  const where: string[] = [];
-  const binds: unknown[] = [];
-  switch (status) {
-    case 'live':
-      where.push(`deleted_at IS NULL AND ${liveLinkSql}`);
-      binds.push(now);
-      break;
-    case 'expired':
-      where.push(`deleted_at IS NULL AND NOT ${liveLinkSql}`);
-      binds.push(now);
-      break;
-    case 'deleted':
-      where.push('deleted_at IS NOT NULL');
-      break;
-    case 'all':
-      break;
-    default:
-      throw new HttpError(400, 'invalid_status', 'status must be live|expired|deleted|all');
-  }
-  if (kind && KIND_FILTERS[kind]) {
-    where.push(KIND_FILTERS[kind]);
-  } else if (kind === 'other') {
-    where.push("NOT (content_type LIKE 'image/%' OR content_type LIKE 'audio/%' OR content_type LIKE 'video/%' OR content_type LIKE 'text/%')");
-  }
-  if (tag) {
-    where.push(
-      `EXISTS (SELECT 1 FROM json_each(COALESCE(NULLIF(tags, ''), '[]')) WHERE value = ?)`,
-    );
-    binds.push(tag);
-  }
-  if (projectRaw) {
-    const projectId = await resolveProjectFilter(env, projectRaw);
-    if (projectId === null) {
-      where.push('project_id IS NULL');
-    } else if (projectId !== undefined) {
-      where.push('project_id = ?');
-      binds.push(projectId);
-    }
-  }
-  if (q) {
-    where.push('(hash LIKE ? OR filename LIKE ? OR note LIKE ? OR tags LIKE ?)');
-    binds.push(`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`);
-  }
-  const whereSql = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
-  const total = await first<{ n: number }>(env, `SELECT COUNT(*) AS n FROM assets ${whereSql}`, ...binds);
-  const rows = await all<AssetRow>(
-    env,
-    `SELECT * FROM assets ${whereSql} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
-    ...binds,
-    limit,
-    offset,
-  );
-  const stats = await linkStatsForAssets(env, rows.map((row) => row.hash), now);
-  const projectMap = await projectsByIds(
-    env,
-    rows.map((row) => row.project_id).filter((id): id is string => Boolean(id)),
-  );
+  const found = await searchAssets(env, {
+    q: url.searchParams.get('q')?.trim() ?? '',
+    status: url.searchParams.get('status') ?? 'live',
+    kind: url.searchParams.get('kind') ?? '',
+    tag,
+    project: projectRaw,
+    limit: url.searchParams.get('limit'),
+    offset: url.searchParams.get('offset'),
+  });
   return jsonResponse({
-    total: total?.n ?? 0,
-    limit,
-    offset,
+    ...found,
     tag: tag || null,
     project: projectRaw || null,
-    assets: rows.map((row) =>
-      summarizeAssetWithLinks(
-        env,
-        row,
-        stats.get(row.hash)!,
-        now,
-        projectRef(row.project_id ? projectMap.get(row.project_id) : null),
-      ),
-    ),
   });
 });
 
 /** Distinct tags with live-asset counts, for the dashboard tag nav. */
-router.get('/tags', async (ctx) => {
-  const now = nowMs();
-  const rows = await all<{ tag: string; count: number }>(
-    ctx.env,
-    `SELECT je.value AS tag, COUNT(*) AS count
-     FROM assets
-     JOIN json_each(COALESCE(NULLIF(assets.tags, ''), '[]')) AS je
-     WHERE assets.deleted_at IS NULL
-       AND EXISTS (
-         SELECT 1 FROM links
-         WHERE links.asset_hash = assets.hash
-           AND links.revoked_at IS NULL
-           AND (links.expires_at IS NULL OR links.expires_at > ?)
-       )
-     GROUP BY je.value
-     ORDER BY count DESC, je.value COLLATE NOCASE ASC`,
-    now,
-  );
-  return jsonResponse({ tags: rows });
-});
+router.get('/tags', async (ctx) => jsonResponse(await listTags(ctx.env)));
 
 router.get('/projects', async (ctx) => {
-  const now = nowMs();
   const includeArchived = ctx.url.searchParams.get('archived') === '1';
-  const rows = await all<ProjectRow & { asset_count: number }>(
-    ctx.env,
-    `SELECT projects.*,
-            (SELECT COUNT(*) FROM assets
-             WHERE assets.project_id = projects.id
-               AND assets.deleted_at IS NULL
-               AND EXISTS (
-                 SELECT 1 FROM links
-                 WHERE links.asset_hash = assets.hash
-                   AND links.revoked_at IS NULL
-                   AND (links.expires_at IS NULL OR links.expires_at > ?)
-               )) AS asset_count
-     FROM projects
-     ${includeArchived ? '' : 'WHERE projects.archived_at IS NULL'}
-     ORDER BY projects.name COLLATE NOCASE ASC`,
-    now,
-  );
-  const unassigned = await first<{ n: number }>(
-    ctx.env,
-    `SELECT COUNT(*) AS n FROM assets
-     WHERE project_id IS NULL
-       AND deleted_at IS NULL
-       AND EXISTS (
-         SELECT 1 FROM links
-         WHERE links.asset_hash = assets.hash
-           AND links.revoked_at IS NULL
-           AND (links.expires_at IS NULL OR links.expires_at > ?)
-       )`,
-    now,
-  );
-  return jsonResponse({
-    projects: rows.map((row) => summarizeProject(row, row.asset_count ?? 0)),
-    unassigned: unassigned?.n ?? 0,
-  });
+  return jsonResponse(await listProjects(ctx.env, includeArchived));
 });
 
 router.post('/projects', async (ctx) => {
   const body = await readJson(ctx.request);
-  // Prefer explicit slug; Chinese-only display names need a separate ASCII slug.
-  const slugSource = body.slug ?? body.name;
-  if (slugSource === undefined || slugSource === null || String(slugSource).trim() === '') {
-    throw new HttpError(400, 'invalid_project_slug', 'pass slug (ASCII) and optional name');
-  }
-  const slug = normalizeProjectSlug(slugSource);
-  const nameRaw = body.name === undefined || body.name === null
-    ? slug
-    : String(body.name).trim();
-  if (nameRaw === '') throw new HttpError(400, 'invalid_name', 'name is required');
-  if (nameRaw.length > MAX_PROJECT_NAME_LENGTH) {
-    throw new HttpError(400, 'invalid_name', `name must be at most ${MAX_PROJECT_NAME_LENGTH} characters`);
-  }
-  const note = body.note === undefined || body.note === null ? null : String(body.note).slice(0, 500);
-  const existing = await getProjectBySlug(ctx.env, slug);
-  if (existing) throw new HttpError(409, 'slug_taken', `project slug "${slug}" already exists`);
-
-  const id = randomHash(22);
-  const now = nowMs();
-  try {
-    await run(
-      ctx.env,
-      `INSERT INTO projects (id, slug, name, note, created_at) VALUES (?, ?, ?, ?, ?)`,
-      id,
-      slug,
-      nameRaw,
-      note,
-      now,
-    );
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (/unique constraint failed/i.test(message)) {
-      throw new HttpError(409, 'slug_taken', `project slug "${slug}" already exists`);
-    }
-    throw error;
-  }
-  await audit(ctx.env, {
-    actor: ctx.identity!.actor,
-    action: 'project:create',
-    target: id,
-    ip: clientIp(ctx.request),
-    detail: `${slug} (${nameRaw})`,
+  const created = await createProject(serviceCtx(ctx), {
+    slug: body.slug as string | undefined,
+    name: body.name as string | undefined,
+    note: body.note as string | undefined,
   });
-  const created = await getProject(ctx.env, id);
-  return jsonResponse({ project: summarizeProject(created!) }, { status: 201 });
+  return jsonResponse(created, { status: 201 });
 });
 
 router.get('/projects/:id', async (ctx) => {
@@ -674,72 +442,31 @@ router.post('/assets/batch', async (ctx) => {
 });
 
 router.get('/assets/:hash', async (ctx) => {
-  const asset = await loadAssetOr404(ctx.env, ctx.params.hash);
-  const now = nowMs();
-  const links = await all<LinkRow>(
-    ctx.env,
-    'SELECT * FROM links WHERE asset_hash = ? ORDER BY created_at DESC',
-    asset.hash,
-  );
+  const detail = await getAssetDetail(ctx.env, ctx.params.hash);
   const trail = await all<{ at: number; actor: string; action: string; detail: string | null }>(
     ctx.env,
     'SELECT at, actor, action, detail FROM audit_log WHERE target = ? OR target IN (SELECT hash FROM links WHERE asset_hash = ?) ORDER BY at DESC LIMIT 40',
     ctx.params.hash,
     ctx.params.hash,
   );
-  const summary = await summarizeOne(ctx.env, asset, now);
-  return jsonResponse({
-    asset: {
-      ...summary,
-      editable_text: isEditableTextAsset(asset.content_type, asset.filename),
-      markdown: isMarkdownAsset(asset.content_type, asset.filename),
-    },
-    links: links.map((link) => linkSummary(ctx.env, link, asset.filename, now)),
-    audit: trail,
-  });
+  return jsonResponse({ ...detail, audit: trail });
 });
 
-router.get('/assets/:hash/links', async (ctx) => {
-  const asset = await loadAssetOr404(ctx.env, ctx.params.hash);
-  const now = nowMs();
-  const links = await all<LinkRow>(
-    ctx.env,
-    'SELECT * FROM links WHERE asset_hash = ? ORDER BY created_at DESC',
-    asset.hash,
-  );
-  return jsonResponse({
-    asset_hash: asset.hash,
-    links: links.map((link) => linkSummary(ctx.env, link, asset.filename, now)),
-  });
-});
+router.get('/assets/:hash/links', async (ctx) =>
+  jsonResponse(await listLinks(ctx.env, ctx.params.hash)));
 
 router.post('/assets/:hash/links', async (ctx) => {
-  const { env } = ctx;
-  const asset = await loadAssetOr404(env, ctx.params.hash);
-  if (asset.deleted_at !== null || asset.purged_at !== null) {
-    throw new HttpError(409, 'not_live', 'restore the asset before creating links');
-  }
   const body = await readJson(ctx.request);
-  const now = nowMs();
-  const hint = parseExpiryHint(body);
-  const expiresAt = await resolveLinkExpiry(env, hint, now);
-  const requested = body.hash === undefined || body.hash === null ? null : String(body.hash);
-  const link = await insertLink(env, {
-    assetHash: asset.hash,
-    expiresAt,
-    label: body.label === undefined || body.label === null ? null : String(body.label),
-    createdBy: ctx.identity!.actor,
-    requestedHash: requested,
-    now,
+  const created = await createLink(serviceCtx(ctx), {
+    asset_hash: ctx.params.hash,
+    expires_in: body.expires_in as string | undefined,
+    expires_at: body.expires_at as string | undefined,
+    never: body.never as boolean | undefined,
+    ttl: body.ttl as string | undefined,
+    label: body.label as string | undefined,
+    hash: body.hash as string | undefined,
   });
-  await audit(env, {
-    actor: ctx.identity!.actor,
-    action: 'link:create',
-    target: link.hash,
-    ip: clientIp(ctx.request),
-    detail: `asset ${asset.hash}; expires ${expiresAt ?? 'never'}`,
-  });
-  return jsonResponse({ link: linkSummary(env, link, asset.filename, now) }, { status: 201 });
+  return jsonResponse(created, { status: 201 });
 });
 
 /**
@@ -747,34 +474,13 @@ router.post('/assets/:hash/links', async (ctx) => {
  * Body: `{ expires_in?: "30m"|"1h"|"4h", label? }` — default 1h.
  */
 router.post('/assets/:hash/temp-link', async (ctx) => {
-  const { env } = ctx;
-  const asset = await loadAssetOr404(env, ctx.params.hash);
-  if (asset.deleted_at !== null || asset.purged_at !== null) {
-    throw new HttpError(409, 'not_live', 'restore the asset before creating links');
-  }
   const body = await readJson(ctx.request);
-  const now = nowMs();
-  const expiresAt = resolveTempLinkExpiry(body.expires_in, now);
-  const link = await insertLink(env, {
-    assetHash: asset.hash,
-    expiresAt,
-    label: body.label === undefined || body.label === null
-      ? 'temp'
-      : String(body.label).slice(0, 80),
-    createdBy: ctx.identity!.actor,
-    now,
+  const created = await createTempLink(serviceCtx(ctx), {
+    asset_hash: ctx.params.hash,
+    expires_in: body.expires_in as string | undefined,
+    label: body.label as string | undefined,
   });
-  await audit(env, {
-    actor: ctx.identity!.actor,
-    action: 'link:temp',
-    target: link.hash,
-    ip: clientIp(ctx.request),
-    detail: `asset ${asset.hash}; expires_at ${expiresAt}`,
-  });
-  return jsonResponse({
-    link: linkSummary(env, link, asset.filename, now),
-    max_seconds: TEMP_LINK_MAX_SECONDS,
-  }, { status: 201 });
+  return jsonResponse(created, { status: 201 });
 });
 
 router.patch('/links/:hash', async (ctx) => {
@@ -816,26 +522,8 @@ router.patch('/links/:hash', async (ctx) => {
   return jsonResponse({ link: linkSummary(env, updated, asset.filename) });
 });
 
-router.delete('/links/:hash', async (ctx) => {
-  const { env } = ctx;
-  const link = await loadLinkOr404(env, ctx.params.hash);
-  const asset = await loadAssetOr404(env, link.asset_hash);
-  if (link.revoked_at === null) {
-    await run(env, 'UPDATE links SET revoked_at = ? WHERE hash = ?', nowMs(), link.hash);
-    await purgeLink(env, ctx.exec, link.hash, asset.filename);
-    await audit(env, {
-      actor: ctx.identity!.actor,
-      action: 'link:revoke',
-      target: link.hash,
-      ip: clientIp(ctx.request),
-      detail: `asset ${asset.hash}`,
-    });
-  }
-  const updated = await loadLinkOr404(env, link.hash);
-  return jsonResponse({ revoked: link.hash, link: linkSummary(env, updated, asset.filename) });
-});
-
-const TEXT_EDIT_LIMIT = 2 * 1024 * 1024;
+router.delete('/links/:hash', async (ctx) =>
+  jsonResponse(await revokeLink(serviceCtx(ctx), ctx.params.hash)));
 
 router.get('/assets/:hash/content', async (ctx) => {
   const asset = await loadAssetOr404(ctx.env, ctx.params.hash);
@@ -855,172 +543,41 @@ router.get('/assets/:hash/content', async (ctx) => {
 });
 
 router.put('/assets/:hash/content', async (ctx) => {
-  const { env, request } = ctx;
-  const asset = await loadAssetOr404(env, ctx.params.hash);
-  if (!isEditableTextAsset(asset.content_type, asset.filename)) {
-    throw new HttpError(415, 'not_editable', 'only markdown/plain text can be saved from the editor');
-  }
-  if (asset.deleted_at !== null || asset.purged_at !== null) {
-    throw new HttpError(409, 'not_live', 'restore the asset before editing its content');
-  }
-  if (!request.body) throw new HttpError(400, 'empty_body', 'request has no body');
-
-  const maxBytes = Math.min(
-    TEXT_EDIT_LIMIT,
-    await getNumberSetting(env, 'max_upload_bytes', Number(env.MAX_UPLOAD_BYTES) || 104_857_600),
-  );
-  const declared = Number(request.headers.get('content-length') ?? Number.NaN);
-  if (Number.isFinite(declared) && declared > maxBytes) {
-    throw new HttpError(413, 'too_large', `editor saves are limited to ${maxBytes} bytes`);
-  }
-
-  const bytes = new Uint8Array(await request.arrayBuffer());
-  if (bytes.byteLength === 0) throw new HttpError(400, 'empty_body', 'refusing to store an empty object');
-  if (bytes.byteLength > maxBytes) {
-    throw new HttpError(413, 'too_large', `editor saves are limited to ${maxBytes} bytes`);
-  }
-
-  const contentType =
-    request.headers.get('content-type')?.trim() ||
-    guessContentType(asset.filename, isMarkdownAsset(asset.content_type, asset.filename)
-      ? 'text/markdown; charset=utf-8'
-      : 'text/plain; charset=utf-8');
-  if (!isEditableTextAsset(contentType, asset.filename)) {
-    throw new HttpError(415, 'not_editable', 'content-type is not an editable text type');
-  }
-
-  const object = await env.BUCKET.put(asset.object_key, bytes, {
-    httpMetadata: { contentType },
-    customMetadata: {
-      hash: asset.hash,
-      filename: asset.filename,
-    },
+  if (!ctx.request.body) throw new HttpError(400, 'empty_body', 'request has no body');
+  const bytes = new Uint8Array(await ctx.request.arrayBuffer());
+  const updated = await writeTextContent(serviceCtx(ctx), {
+    asset_hash: ctx.params.hash,
+    content: bytes,
+    content_type: ctx.request.headers.get('content-type')?.trim() || undefined,
   });
-  const size = object?.size ?? bytes.byteLength;
-  const etag = object?.etag ?? null;
-  await run(
-    env,
-    'UPDATE assets SET content_type = ?, size = ?, etag = ? WHERE hash = ?',
-    contentType,
-    size,
-    etag,
-    asset.hash,
-  );
-  await purgeAssetLinks(env, ctx.exec, asset.hash, asset.filename);
-  await audit(env, {
-    actor: ctx.identity!.actor,
-    action: 'content:update',
-    target: asset.hash,
-    ip: clientIp(request),
-    detail: `${asset.filename} (${size} bytes)`,
-  });
-  const updated = await loadAssetOr404(env, asset.hash);
   return jsonResponse({
     asset: {
-      ...(await summarizeOne(env, updated)),
+      ...updated.asset,
       editable_text: true,
-      markdown: isMarkdownAsset(updated.content_type, updated.filename),
+      markdown: isMarkdownAsset(updated.asset.content_type, updated.asset.filename),
     },
   });
 });
 
 router.patch('/assets/:hash', async (ctx) => {
-  const { env } = ctx;
-  const hash = ctx.params.hash;
-  const asset = await loadAssetOr404(env, hash);
   const body = await readJson(ctx.request);
-  const updates: string[] = [];
-  const binds: unknown[] = [];
-
-  if ('filename' in body) {
-    updates.push('filename = ?');
-    binds.push(sanitizeFilename(requireString(body.filename, 'filename'), asset.filename));
-  }
-  if ('note' in body) {
-    updates.push('note = ?');
-    binds.push(body.note === null ? null : String(body.note).slice(0, 500));
-  }
-  if ('tags' in body) {
-    updates.push('tags = ?');
-    binds.push(serializeTags(normalizeTags(body.tags)));
-  }
-  const projectAssign = await resolveProjectAssignment(env, body);
-  if (projectAssign.touched) {
-    updates.push('project_id = ?');
-    binds.push(projectAssign.projectId);
-  }
-  if (updates.length === 0) {
-    throw new HttpError(400, 'nothing_to_update', 'pass filename, note, tags or project');
-  }
-
-  await run(env, `UPDATE assets SET ${updates.join(', ')} WHERE hash = ?`, ...binds, hash);
-  await purgeAssetLinks(env, ctx.exec, hash, asset.filename);
-  await audit(env, {
-    actor: ctx.identity!.actor,
-    action: 'update',
-    target: hash,
-    ip: clientIp(ctx.request),
-    detail: JSON.stringify(body).slice(0, 400),
+  const updated = await updateAsset(serviceCtx(ctx), {
+    asset_hash: ctx.params.hash,
+    filename: body.filename as string | undefined,
+    note: (body.note as string | null | undefined),
+    tags: body.tags as string | string[] | undefined,
+    projectInput: body,
   });
-  const updated = await loadAssetOr404(env, hash);
-  return jsonResponse({ asset: await summarizeOne(env, updated) });
+  return jsonResponse(updated);
 });
 
 router.delete('/assets/:hash', async (ctx) => {
-  const { env, url } = ctx;
-  const asset = await loadAssetOr404(env, ctx.params.hash);
-  const hard = url.searchParams.get('purge') === '1' || url.searchParams.get('hard') === '1';
-
-  if (hard) {
-    await env.BUCKET.delete(asset.object_key);
-    await run(env, 'DELETE FROM links WHERE asset_hash = ?', asset.hash);
-    await run(env, 'DELETE FROM assets WHERE hash = ?', asset.hash);
-  } else {
-    const retentionDays = await getNumberSetting(env, 'trash_retention_days', Number(env.TRASH_RETENTION_DAYS) || 7);
-    const now = nowMs();
-    await run(
-      env,
-      'UPDATE assets SET deleted_at = ?, delete_reason = ? WHERE hash = ?',
-      now,
-      'manual',
-      asset.hash,
-    );
-    // Revoke every live link so existing URLs stop immediately.
-    await run(
-      env,
-      'UPDATE links SET revoked_at = ? WHERE asset_hash = ? AND revoked_at IS NULL',
-      now,
-      asset.hash,
-    );
-    if (retentionDays <= 0) {
-      await env.BUCKET.delete(asset.object_key);
-      await run(env, 'UPDATE assets SET purged_at = ? WHERE hash = ?', now, asset.hash);
-    }
-  }
-
-  await purgeAssetLinks(env, ctx.exec, asset.hash, asset.filename);
-  await audit(env, {
-    actor: ctx.identity!.actor,
-    action: hard ? 'delete:hard' : 'delete',
-    target: asset.hash,
-    ip: clientIp(ctx.request),
-    detail: asset.filename,
-  });
-  return jsonResponse({ deleted: asset.hash, hard });
+  const hard = ctx.url.searchParams.get('purge') === '1' || ctx.url.searchParams.get('hard') === '1';
+  return jsonResponse(await deleteAsset(serviceCtx(ctx), ctx.params.hash, hard));
 });
 
-router.post('/assets/:hash/restore', async (ctx) => {
-  const { env } = ctx;
-  const asset = await loadAssetOr404(env, ctx.params.hash);
-  if (asset.purged_at !== null) {
-    throw new HttpError(409, 'purged', 'the bytes for this asset are gone; the row is metadata only');
-  }
-  await run(env, 'UPDATE assets SET deleted_at = NULL, delete_reason = NULL WHERE hash = ?', asset.hash);
-  await purgeAssetLinks(env, ctx.exec, asset.hash, asset.filename);
-  await audit(env, { actor: ctx.identity!.actor, action: 'restore', target: asset.hash, ip: clientIp(ctx.request) });
-  const updated = await loadAssetOr404(env, asset.hash);
-  return jsonResponse({ asset: await summarizeOne(env, updated) });
-});
+router.post('/assets/:hash/restore', async (ctx) =>
+  jsonResponse(await restoreAsset(serviceCtx(ctx), ctx.params.hash)));
 
 router.get('/keys', async (ctx) => {
   const keys = await all<Record<string, unknown>>(

@@ -107,6 +107,29 @@ CREATE TABLE IF NOT EXISTS settings (
   v TEXT NOT NULL
 );
 
+-- One-shot upload sessions for MCP clients. A session reserves the metadata;
+-- the bytes arrive later with PUT /mcp/uploads/:id (OAuth, Content-Length).
+-- Sessions are single-use and expire quickly; never a public locator.
+CREATE TABLE IF NOT EXISTS upload_sessions (
+  id              TEXT PRIMARY KEY,
+  filename        TEXT NOT NULL,
+  content_type    TEXT NOT NULL,
+  size_expected   INTEGER,                -- NULL = accept the declared length
+  note            TEXT,
+  tags            TEXT,                   -- JSON string array
+  project_id      TEXT,
+  link_expires_at INTEGER,                -- expiry of the first share link
+  created_by      TEXT NOT NULL,
+  created_at      INTEGER NOT NULL,
+  expires_at      INTEGER NOT NULL,       -- complete the PUT before this
+  completed_at    INTEGER,                -- set once the bytes landed
+  asset_hash      TEXT,                   -- created asset, once completed
+  upload_key      TEXT,                   -- single-use PUT secret (signed URL)
+  FOREIGN KEY (project_id) REFERENCES projects(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_upload_sessions_expires ON upload_sessions (expires_at);
+
 INSERT OR IGNORE INTO settings (k, v) VALUES
   ('default_ttl_days', '7'),
   ('max_upload_bytes', '104857600'),

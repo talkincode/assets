@@ -37,6 +37,22 @@ npm run db:migrate:projects
 npm run db:migrate:projects:local
 ```
 
+## 1.5 MCP 需要的 KV 与表结构
+
+MCP OAuth 状态（token、授权、客户端注册）存在 KV 里，先建一次：
+
+```bash
+npx wrangler kv namespace create OAUTH_KV
+```
+
+把输出的 `id` 填进 `wrangler.toml` 的 `[[kv_namespaces]]`（`binding = "OAUTH_KV"`）。
+已有 D1 库再应用上传 session 表（新库已含在 `schema.sql`）：
+
+```bash
+npm run db:migrate:upload-sessions          # 远程
+npm run db:migrate:upload-sessions:local    # 本地开发库
+```
+
 ## 2. 首次部署
 
 ```bash
@@ -140,6 +156,24 @@ Dashboard 侧栏有「退出登录」，跳转到：
 
 > Worker 侧会独立校验 `Cf-Access-Jwt-Assertion` 的 RS256 签名、`aud`、有效期与邮箱名单，
 > 命中不了就 401/403。即使有人绕过边缘，也拿不到管理数据。
+
+## 4.5 接入 Cloudflare 统一 MCP 门户（MCP Portal）
+
+1. 按上面步骤部署，确认 `GET https://assets.talkincode.net/.well-known/oauth-protected-resource/mcp`
+   返回 `resource = https://assets.talkincode.net/mcp`。
+2. Zero Trust → Access controls → **MCP Portals** → MCP servers → Add MCP server：
+   - HTTP URL：`https://assets.talkincode.net/mcp`
+   - 认证选 **OAuth**，用 DCR（`/register` 已就绪）；允许的 redirect URI 按控制台提示加。
+   - 按需配 Allow 策略（谁能在门户里看到这个 server）。
+3. 建一个 Portal，把该 server 加进去；工具按场景开关（常用：`search_assets` +
+   `get_asset` + `create_temp_link`；`delete_asset`/`revoke_link` 需要 `assets:admin`，
+   建议只给受信任的 Portal）。
+4. 用户在 MCP 客户端里连 Portal URL：先过 Portal 的 Access 登录，再按提示完成
+   上游（Assets）OAuth——浏览器里先登录过 `/admin/` 的话，授权页直接显示同意按钮。
+
+注意：`/authorize` 不需要额外建 Access 应用，Worker 自己验 dashboard 身份
+（header 或 dashboard 登录 cookie）。换 `PUBLIC_BASE_URL` 必须同步改
+`src/mcp.ts` 的 `MCP_RESOURCE`/`MCP_ISSUER`（有测试盯着两者一致）。
 
 ## 5. CLI 的管理命令
 
