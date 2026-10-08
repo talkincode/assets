@@ -341,6 +341,39 @@ describe('mcp write and admin tools', () => {
     expect(noKey.status).toBe(404);
   });
 
+  it('uploads small files directly through the tool', async () => {
+    const token = await authorize(['assets:read', 'assets:write']);
+    const init = await mcpCall(token, undefined, 1, 'initialize', {
+      protocolVersion: '2026-07-28',
+      capabilities: {},
+      clientInfo: { name: 'mcp-test', version: '0.1.0' },
+    });
+    const version = init.result.protocolVersion as string;
+
+    const bytes = new TextEncoder().encode('direct-bytes');
+    let binary = '';
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    const uploaded = await mcpCall(token, version, 2, 'tools/call', {
+      name: 'upload_file',
+      arguments: { filename: 'direct.txt', content: btoa(binary), tags: 'direct' },
+    });
+    expect(uploaded.result.isError).toBeUndefined();
+    const body = JSON.parse(uploaded.result.content[0].text);
+    expect(body.filename).toBe('direct.txt');
+    expect(body.url).toContain(`/${body.hash}/direct.txt`);
+
+    const served = await SELF.fetch(`${BASE}/${body.hash}/direct.txt`);
+    expect(served.status).toBe(200);
+    expect(await served.text()).toBe('direct-bytes');
+
+    const bad = await mcpCall(token, version, 3, 'tools/call', {
+      name: 'upload_file',
+      arguments: { filename: 'bad.txt', content: '!!!not-base64!!!' },
+    });
+    expect(bad.result.isError).toBe(true);
+    expect(bad.result.content[0].text).toContain('invalid_content');
+  });
+
   it('deletes, restores, and revokes with the admin scope', async () => {
     const key = await uploadKey();
     const fixture = await uploadFixture(key, '# admin\n', 'admin.md');

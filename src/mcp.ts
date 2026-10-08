@@ -23,10 +23,12 @@ import {
   revokeLink,
   searchAssets,
   updateAsset,
+  uploadFileDirect,
   writeTextContent,
   type CreateLinkArgs,
   type CreateProjectArgs,
   type CreateSessionArgs,
+  type DirectUploadArgs,
   type CreateTempLinkArgs,
   type SearchArgs,
   type ServiceCtx,
@@ -335,6 +337,25 @@ export function createAssetsMcpServer(deps: McpRequestDeps): McpServer {
       annotations: { idempotentHint: false },
     },
     guarded<CreateProjectArgs>(identity, SCOPE_WRITE, (args) => createProject(svc, args)),
+  );
+
+  server.registerTool(
+    'upload_file',
+    {
+      description:
+        'Upload a small file in one call: base64 bytes in, asset + share link out. ' +
+        'Max 10 MiB decoded; bigger files must use create_upload_session. Binary-safe.',
+      inputSchema: z.object({
+        filename: z.string().describe('Download filename, e.g. "cover.png"'),
+        content: z.string().describe('Standard base64 of the file bytes'),
+        content_type: z.string().optional().describe('Inferred from filename when omitted'),
+        note: z.string().max(500).optional(),
+        tags: tagsArg,
+        project: z.string().optional(),
+      }),
+      annotations: { openWorldHint: true },
+    },
+    guarded<DirectUploadArgs>(identity, SCOPE_WRITE, (args) => uploadFileDirect(svc, args)),
   );
 
   server.registerTool(

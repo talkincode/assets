@@ -115,7 +115,8 @@ Scope：`assets:read`（搜索/读取）、`assets:write`（建链/改元数据/
 | `create_project` | write | 新建项目文件夹（`slug`/`name` 二选一） |
 | `update_asset` | write | 改 `filename`/`note`/`tags`/`project` |
 | `write_text_content` | write | 覆盖文本资产字节（≤2 MiB） |
-| `create_upload_session` | write | 预定上传：返回 `upload_url`，单次 PUT 字节（需 `Content-Length`） |
+| `upload_file` | write | 小文件直传：base64 进、资产 + 首链出（解码 ≤10 MiB，更大的走 session） |
+| `create_upload_session` | write | 预定上传：返回一次性签名 `upload_url`，单次 PUT 字节（需 `Content-Length`，无需 OAuth 头） |
 | `delete_asset` | admin | 软删（吊销全部链接，字节保留 7 天）；`purge=true` 立即彻底删除 |
 | `restore_asset` | admin | 恢复软删资产（链接保持吊销，需重建） |
 | `revoke_link` | admin | 吊销一条分享链 |
