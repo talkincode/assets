@@ -14,8 +14,11 @@
  */
 
 import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { basename, resolve } from 'node:path';
 import process from 'node:process';
+
+const DEFAULT_ENV_FILE = resolve(homedir(), '.config/talkincode-assets/env');
 
 /** Must match server TEMP_LINK_MAX_SECONDS. */
 const TEMP_LINK_MAX_SECONDS = 4 * 60 * 60;
@@ -62,13 +65,13 @@ Global: --json  --quiet/-q  --base-url URL  --env-file PATH
 Env: ASSETS_BASE_URL, ASSETS_KEY, CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET
 `;
 
-function loadEnvFile(path) {
+function loadEnvFile(path, { override = false } = {}) {
   if (!existsSync(path)) return;
   for (const line of readFileSync(path, 'utf8').split('\n')) {
     const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/.exec(line);
     if (!match) continue;
     const [, key, rawValue] = match;
-    if (process.env[key] !== undefined) continue;
+    if (!override && process.env[key] !== undefined) continue;
     process.env[key] = rawValue.replace(/^['"]|['"]$/g, '');
   }
 }
@@ -107,7 +110,10 @@ if (command === 'help' || flags.help) {
   process.exit(0);
 }
 
-loadEnvFile(flags['env-file'] ? resolve(flags['env-file']) : resolve(process.cwd(), '.env'));
+// Defaults: ~/.config/talkincode-assets/env, then cwd .env, then --env-file (highest).
+loadEnvFile(DEFAULT_ENV_FILE);
+loadEnvFile(resolve(process.cwd(), '.env'), { override: true });
+if (flags['env-file']) loadEnvFile(resolve(flags['env-file']), { override: true });
 
 const baseUrl = (flags['base-url'] ?? process.env.ASSETS_BASE_URL ?? 'https://assets.talkincode.net').replace(/\/+$/, '');
 const uploadKey = process.env.ASSETS_KEY;
