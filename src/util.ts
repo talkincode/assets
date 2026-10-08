@@ -25,6 +25,13 @@ export const RESERVED_SEGMENTS = new Set([
   'assets',
   'static',
   '.well-known',
+  // MCP + OAuth endpoints answer upstream; stray hits stay quiet instead of
+  // burning the abuse budget.
+  'mcp',
+  'uploads',
+  'authorize',
+  'token',
+  'register',
 ]);
 
 const HASH_PATTERN = new RegExp(`^[A-Za-z0-9_-]{${MIN_CUSTOM_HASH_LENGTH},${MAX_HASH_LENGTH}}$`);

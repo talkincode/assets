@@ -15,10 +15,11 @@ export interface SweepResult {
   purged: number;
   blocksCleared: number;
   auditPruned: number;
+  sessionsCleared: number;
 }
 
 export async function sweep(env: Env, exec: ExecutionContext, now = Date.now()): Promise<SweepResult> {
-  const result: SweepResult = { purged: 0, blocksCleared: 0, auditPruned: 0 };
+  const result: SweepResult = { purged: 0, blocksCleared: 0, auditPruned: 0, sessionsCleared: 0 };
 
   // Deleted assets keep their bytes for a while so a mistake is recoverable.
   const retentionDays = await getNumberSetting(env, 'trash_retention_days', Number(env.TRASH_RETENTION_DAYS) || 7);
@@ -59,6 +60,15 @@ export async function sweep(env: Env, exec: ExecutionContext, now = Date.now()):
 
   const pruned = await run(env, 'DELETE FROM audit_log WHERE at < ?', now - 180 * 86_400_000);
   result.auditPruned = pruned.meta.changes ?? 0;
+
+  // Upload sessions that never received bytes are single-use reservations;
+  // drop them once expired so the table stays bounded.
+  const sessions = await run(
+    env,
+    'DELETE FROM upload_sessions WHERE completed_at IS NULL AND expires_at < ?',
+    now,
+  );
+  result.sessionsCleared = sessions.meta.changes ?? 0;
 
   return result;
 }

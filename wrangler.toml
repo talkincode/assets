@@ -5,6 +5,9 @@
 name = "talkincode-assets"
 main = "src/index.ts"
 compatibility_date = "2026-08-01"
+# nodejs_compat: agents SDK + MCP/OAuth libraries use node:async_hooks.
+# global_fetch_strictly_public: required for OAuth Client ID Metadata Documents.
+compatibility_flags = ["nodejs_compat", "global_fetch_strictly_public"]
 workers_dev = false
 account_id = "83b40c9065a6f4631f4ab6cda824a21a"
 
@@ -54,6 +57,11 @@ bucket_name = "talkincode-assets"
 binding = "DB"
 database_name = "talkincode-assets"
 database_id = "dc3e79a9-60f8-4bc0-87eb-6c1782fb6b5d"
+
+# OAuth state for the MCP server (tokens, grants, client registrations).
+[[kv_namespaces]]
+binding = "OAUTH_KV"
+id = "77abb3b6f30e4512b47b285a810ac822"
 
 [durable_objects]
 bindings = [{ name = "ABUSE", class_name = "AbuseGuard" }]

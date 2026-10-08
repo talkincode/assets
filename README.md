@@ -9,6 +9,8 @@
 - **过期**：只挂在链接上（上传默认首链 7 天）；到期 410，**不删** R2。
 - **dashboard**：`/admin/`，Cloudflare Access；可预览/建链/吊销/Markdown 编辑。
 - **CLI / Agent**：`assets temp <hash|query> --expire 1h -q` 开临时链（**硬上限 4h**）。
+- **MCP**：`/mcp`（Streamable HTTP + OAuth），给 Cloudflare MCP Portal 用；
+  scope 分 `assets:read/write/admin`，大文件走 `create_upload_session` + PUT。
 - **上传密钥**与暴力破解防护：同前。
 
 ## 架构
@@ -37,6 +39,8 @@ flowchart TD
 | --- | --- | --- | --- |
 | GET/HEAD | `/<hash>/<filename?>` | 无（link hash 即凭证） | 下载/预览；410=链接过期 |
 | POST/PUT | `/api/upload` | 上传密钥 | 建资产 + 首链，返回 link `hash`/`url` + `asset_hash` |
+| POST | `/mcp` | MCP OAuth | MCP 工具/资源/提示词（Streamable HTTP） |
+| PUT | `/mcp/uploads/:id` | MCP OAuth | 上传 session 字节（单次，`Content-Length` 必填） |
 | GET | `/health` | 无 | 存活探测 |
 | ANY | `/admin/api/*` | Cloudflare Access | dashboard 与管理 API |
 | GET | `/admin/` | Cloudflare Access | dashboard 静态页面 |

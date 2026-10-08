@@ -20,6 +20,10 @@
     "db:migrate:links:local": "wrangler d1 execute talkincode-assets --local -y --file=./migrations/002_share_links.sql",
     "db:migrate:projects": "wrangler d1 execute talkincode-assets --remote -y --file=./migrations/003_projects.sql",
     "db:migrate:projects:local": "wrangler d1 execute talkincode-assets --local -y --file=./migrations/003_projects.sql",
+    "db:migrate:upload-sessions": "wrangler d1 execute talkincode-assets --remote -y --file=./migrations/004_upload_sessions.sql",
+    "db:migrate:upload-sessions:local": "wrangler d1 execute talkincode-assets --local -y --file=./migrations/004_upload_sessions.sql",
+    "db:migrate:session-keys": "wrangler d1 execute talkincode-assets --remote -y --file=./migrations/005_session_keys.sql",
+    "db:migrate:session-keys:local": "wrangler d1 execute talkincode-assets --local -y --file=./migrations/005_session_keys.sql",
     "key:bootstrap": "node scripts/bootstrap-key.mjs",
     "access:setup": "bash scripts/setup-access.sh",
     "smoke": "bash scripts/smoke.sh"
@@ -33,5 +37,11 @@
   "engines": {
     "node": ">=20"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "@cloudflare/workers-oauth-provider": "^1.2.3",
+    "@modelcontextprotocol/server": "2.0.0",
+    "agents": "^0.26.0",
+    "zod": "^4.2.0"
+  }
 }

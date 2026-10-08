@@ -89,6 +89,56 @@ curl -sS -X POST "https://assets.talkincode.net/admin/api/assets/$ASSET_HASH/tem
   -d '{"expires_in":"1h","label":"agent"}'
 ```
 
+## MCP（`/mcp`，需 MCP OAuth）
+
+远程 MCP 服务器（Streamable HTTP，无状态），给 Cloudflare MCP Portal 这类
+MCP 客户端用。OAuth 发现按标准来：未授权调 `/mcp` 返回 401 + `WWW-Authenticate`，
+元数据在 `/.well-known/oauth-protected-resource/mcp`，授权页 `/authorize`、
+token `/token`、客户端注册 `/register`。
+
+授权页只认 dashboard 成员：带 `Cf-Access-Jwt-Assertion` 头，或先登录过 `/admin/`
+（浏览器会自动带 `CF_Authorization` cookie）。签发的是本服务的 OAuth token，
+不是 Access token；`aud` 绑定 `https://assets.talkincode.net/mcp`。
+
+Scope：`assets:read`（搜索/读取）、`assets:write`（建链/改元数据/传文件）、
+`assets:admin`（删除/恢复/吊销）。高 scope 兼容低 scope。权限不足的工具调用
+返回 `insufficient_scope`，不暴露数据。
+
+| 工具 | scope | 说明 |
+| --- | --- | --- |
+| `search_assets` | read | 按 `q`/`tag`/`project`/`status`/`kind` 搜索，与 dashboard 列表同规则 |
+| `get_asset` | read | 元数据 + `links[]`（过期/吊销/下载 URL） |
+| `list_projects` / `list_tags` | read | 文件夹与标签 |
+| `read_text_content` | read | Markdown/纯文本原文（≤2 MiB） |
+| `create_temp_link` | write | **临时链**：默认 1h，**硬上限 4h**，与 dashboard/CLI 同规则 |
+| `create_link` | admin | 普通分享链（默认 TTL 策略；`never:true` 建无过期链接） |
+| `create_project` | write | 新建项目文件夹（`slug`/`name` 二选一） |
+| `update_asset` | write | 改 `filename`/`note`/`tags`/`project` |
+| `write_text_content` | write | 覆盖文本资产字节（≤2 MiB） |
+| `create_upload_session` | write | 预定上传：返回 `upload_url`，单次 PUT 字节（需 `Content-Length`） |
+| `delete_asset` | admin | 软删（吊销全部链接，字节保留 7 天）；`purge=true` 立即彻底删除 |
+| `restore_asset` | admin | 恢复软删资产（链接保持吊销，需重建） |
+| `revoke_link` | admin | 吊销一条分享链 |
+
+资源（均为 read）：`asset://meta/<hash>`（JSON 元数据）、`asset://text/<hash>`
+（文本原文）。提示词：`share_asset`（write，开临时链分享）、`asset_digest`
+（read，摘要资产）。所有写操作记审计，actor 为 OAuth 身份邮箱。
+
+大文件不要走 MCP JSON：`create_upload_session` 返回**一次性签名 URL**
+（`.../uploads/:id?key=...`），谁拿到谁 PUT，不需要 OAuth 头——建 session
+和传字节的可以是两个执行体：
+
+```bash
+curl -sS -X PUT "$UPLOAD_URL" \
+  -H "Content-Length: $(wc -c < demo.mp4)" \
+  --data-binary @demo.mp4
+```
+
+key 单次有效、随 session 过期（默认 1h 窗口，最长 4h），猜错计入滥用封禁；
+过期未用的每小时清理。同一执行体手里有 token 时，也可以用 OAuth 头 PUT
+到 `/mcp/uploads/:id`，效果相同。
+
 ## 定时任务
 
-每小时：清理回收站过期字节、过期封禁记录、旧审计。**不会**因链接过期删除 R2。
+每小时：清理回收站过期字节、过期封禁记录、旧审计、过期未用的上传 session、
+过期的 OAuth token/授权。**不会**因链接过期删除 R2。
